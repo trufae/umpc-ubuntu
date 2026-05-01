@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Set to either "gpd-pocket", "gpd-pocket2", "gpd-pocket3", "gpd-p2-max", "gpd-micropc", "gpd-win2", "gpd-win-max" or "topjoy-falcon"
-UMPC="gpd-pocket3"
+# Set to either "gpd-pocket", "gpd-pocket2", "gpd-pocket3", "gpd-p2-max", "gpd-micropc", "gpd-win2", "gpd-win3", "gpd-win-max" or "topjoy-falcon"
+UMPC="${UMPC:-gpd-pocket}"
 XORG_CONF_PATH="/usr/share/X11/xorg.conf.d"
 INTEL_CONF="${XORG_CONF_PATH}/20-${UMPC}-intel.conf"
 MODPROBE_CONF="/etc/modprobe.d/alsa-${UMPC}.conf"
@@ -150,7 +150,7 @@ function enable_umpc_config() {
 
 function disable_umpc_config() {
   # Remove the UMPC Pocket hardware configuration
-  for CONFIG in ${MONITOR_CONF} ${MONITORS_XML} ${TOUCH_CONF} ${TRACKPOINT_CONF} ${GSCHEMA_OVERRIDE} ${EDID} ${BRCM4356_CONF}; do
+  for CONFIG in ${MONITOR_CONF} /var/lib/gdm3/.config/monitors.xml ${TOUCH_RULES} ${TRACKPOINT_CONF} ${MODPROBE_CONF} ${GSCHEMA_OVERRIDE} ${GRUB_D_CONF} ${EDID} ${BRCM4356_CONF} ${HWDB_CONF}; do
     if [ -f "${CONFIG}" ]; then
       rm -fv "${CONFIG}"
     fi
@@ -163,7 +163,7 @@ function disable_umpc_config() {
   update-grub
 
   # Restore tty font size
-  sed -i 's/FONTSIZE=16x32"/FONTSIZE="8x16"/' "${CONSOLE_CONF}"
+  sed -i 's/FONTSIZE="16x32"/FONTSIZE="8x16"/' "${CONSOLE_CONF}"
   # Remove apps
   rm -fv /usr/bin/umpc-display-rotate
   rm -fv /etc/xdg/autostart/umpc-display-rotate.desktop
@@ -177,11 +177,11 @@ function disable_umpc_config() {
 function usage() {
     echo
     echo "Usage"
-    echo "  ${0} enable || disable"
+    echo "  UMPC=gpd-pocket ${0} enable || disable"
     echo ""
     echo "You must supply one of the following modes of operation"
-    echo "  enable  : apply the ${MODEL} hardware configuration"
-    echo "  disable : remove the ${MODEL} hardware configuration"
+    echo "  enable  : apply the ${UMPC} hardware configuration"
+    echo "  disable : remove the ${UMPC} hardware configuration"
     echo "  help    : This help."
     echo
     exit 1
@@ -213,7 +213,7 @@ if [ -z "${UMPC}" ]; then
 fi
 
 case "${UMPC}" in
-  gpd-pocket|gpd-pocket2|gpd-pocket3|gpd-micropc|gpd-p2-max|gpd-win2|gpd-win-max|topjoy-falcon) true;;
+  gpd-pocket|gpd-pocket2|gpd-pocket3|gpd-micropc|gpd-p2-max|gpd-win2|gpd-win3|gpd-win-max|topjoy-falcon) true;;
   *) echo "ERROR! Unknown device name given."
      usage;;
 esac

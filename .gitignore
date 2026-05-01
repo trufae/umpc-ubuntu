@@ -2,3 +2,4 @@
 *.iso
 *.sha256
 *.sign
+/downloads/

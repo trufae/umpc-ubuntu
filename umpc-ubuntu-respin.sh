@@ -18,6 +18,74 @@ function usage() {
     exit
 }
 
+function die() {
+  echo "ERROR! ${*}" >&2
+  exit 1
+}
+
+APT_UPDATED=0
+function install_package() {
+  local PACKAGE="${1}"
+
+  if [ "${APT_UPDATED}" -eq 0 ]; then
+    apt-get update
+    APT_UPDATED=1
+  fi
+  DEBIAN_FRONTEND=noninteractive apt-get -y install "${PACKAGE}"
+}
+
+function require_command() {
+  local COMMAND="${1}"
+  local PACKAGE="${2}"
+
+  if ! command -v "${COMMAND}" >/dev/null 2>&1; then
+    echo "ERROR! Unable to find ${COMMAND}. Installing ${PACKAGE} now..."
+    install_package "${PACKAGE}"
+  fi
+}
+
+function require_file() {
+  local FILE="${1}"
+  local PACKAGE="${2}"
+
+  if [ ! -f "${FILE}" ]; then
+    echo "ERROR! Unable to find ${FILE}. Installing ${PACKAGE} now..."
+    install_package "${PACKAGE}"
+  fi
+}
+
+# Return the root filesystem squashfs path relative to the ISO root.
+function find_squashfs_image() {
+  local CASPER_DIR="${1}"
+  local CANDIDATE=""
+
+  if [ -f "${CASPER_DIR}/filesystem.squashfs" ]; then
+    echo "casper/filesystem.squashfs"
+    return 0
+  fi
+
+  # Ubuntu 24.04 and newer desktop images use layered squashfs files. The
+  # shortest base image is inherited by the live session and install sources.
+  for CANDIDATE in minimal.squashfs ubuntu-server-minimal.squashfs; do
+    if [ -f "${CASPER_DIR}/${CANDIDATE}" ]; then
+      echo "casper/${CANDIDATE}"
+      return 0
+    fi
+  done
+
+  CANDIDATE=$(find "${CASPER_DIR}" -maxdepth 1 -type f -name "*.squashfs" \
+    ! -name "*.live.squashfs" \
+    ! -name "*installer*.squashfs" \
+    ! -name "*.*.squashfs" \
+    -printf "%f\n" | sort | head -n 1)
+  if [ -n "${CANDIDATE}" ]; then
+    echo "casper/${CANDIDATE}"
+    return 0
+  fi
+
+  return 1
+}
+
 # Copy file from /data to it's intended location
 function inject_data() {
   local TARGET_FILE="${1}"
@@ -42,12 +110,22 @@ function inject_data() {
   fi
 }
 
+CLEANED_UP=0
 function clean_up() {
+  if [ "${CLEANED_UP}" -eq 1 ]; then
+    return
+  fi
+  CLEANED_UP=1
+
   echo "Cleaning up..."
-  echo "  - ${MNT_IN}"
-  rm -rf "${MNT_IN}"
-  echo "  - ${MNT_OUT}"
-  rm -rf "${MNT_OUT}"
+  if [ -n "${MNT_IN}" ] && mountpoint -q "${MNT_IN}" 2>/dev/null; then
+    echo "  - Unmounting ${MNT_IN}"
+    umount -l "${MNT_IN}"
+  fi
+  if [ -n "${WORKDIR}" ] && [ -d "${WORKDIR}" ]; then
+    echo "  - ${WORKDIR}"
+    rm -rf "${WORKDIR}"
+  fi
 }
 
 # Make sure we are root.
@@ -56,15 +134,11 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-if [ ! -f /usr/bin/xorriso ]; then
-  echo "ERROR! Unable to find /usr/bin/xorriso. Installing now..."
-  apt-get -y install xorriso
-fi
-
-if [ ! -f /usr/bin/unsquashfs ]; then
-  echo "ERROR! Unable to find /usr/bin/unsquashfs. Installing now..."
-  apt-get -y install squashfs-tools
-fi
+require_command xorriso xorriso
+require_command unsquashfs squashfs-tools
+require_command mksquashfs squashfs-tools
+require_command rsync rsync
+require_command gcc gcc
 
 
 UMPC=""
@@ -80,8 +154,8 @@ shift "$((OPTIND - 1))"
 ISO_IN="${1}"
 
 if [ -z "${UMPC}" ]; then
-    echo "ERROR! You must supply the name of the device you want to apply modifications for."
-    usage
+  echo "ERROR! You must supply the name of the device you want to apply modifications for."
+  usage
 fi
 
 case "${UMPC}" in
@@ -91,13 +165,12 @@ case "${UMPC}" in
 esac
 
 if [ -z "${ISO_IN}" ]; then
-    echo "ERROR! You must provide the filename of an Ubuntu iso image."
-    usage
+  echo "ERROR! You must provide the filename of an Ubuntu iso image."
+  usage
 fi
 
 if [ ! -f "${ISO_IN}" ]; then
-    echo "ERROR! Can not access ${ISO_IN}."
-    exit
+  die "Can not access ${ISO_IN}."
 fi
 
 ISO_OUT=$(basename "${ISO_IN}" | sed "s/\.iso/-${UMPC}\.iso/")
@@ -105,10 +178,10 @@ if [ -f "${ISO_OUT}" ]; then
   rm -f "${ISO_OUT}"
 fi
 
-MNT_IN="${HOME}/iso_in"
-MNT_OUT="${HOME}/iso_out"
-SQUASH_IN="${MNT_IN}/casper/filesystem.squashfs"
-SQUASH_OUT="${MNT_OUT}/casper/squashfs-root"
+WORKDIR=$(mktemp -d -t umpc-ubuntu-respin.XXXXXX)
+MNT_IN="${WORKDIR}/iso_in"
+MNT_OUT="${WORKDIR}/iso_out"
+SQUASH_OUT="${WORKDIR}/squashfs-root"
 XORG_CONF_PATH="${SQUASH_OUT}/usr/share/X11/xorg.conf.d"
 INTEL_CONF="${XORG_CONF_PATH}/20-${UMPC}-intel.conf"
 MODPROBE_CONF="${SQUASH_OUT}/etc/modprobe.d/alsa-${UMPC}.conf"
@@ -123,50 +196,48 @@ GRUB_LOOPBACK_CONF="${MNT_OUT}/boot/grub/loopback.cfg"
 CONSOLE_CONF="${SQUASH_OUT}/etc/default/console-setup"
 GSCHEMA_OVERRIDE="${SQUASH_OUT}/usr/share/glib-2.0/schemas/90-${UMPC}.gschema.override"
 HWDB_CONF="${SQUASH_OUT}/etc/udev/hwdb.d/61-${UMPC}-sensor-local.hwdb"
+trap clean_up EXIT
 
 # Copy the contents of the ISO
 mkdir -p "${MNT_IN}"
 mkdir -p "${MNT_OUT}"
-mount -o loop "${ISO_IN}" "${MNT_IN}"
-if [ $? -ne 0 ]; then
-  echo "ERROR! Unable to mount ${ISO_IN}"
-  clean_up
-  exit 1
+if ! mount -o loop "${ISO_IN}" "${MNT_IN}"; then
+  die "Unable to mount ${ISO_IN}"
 fi
 
 if [ -d "${MNT_IN}/isolinux" ]; then
   ISO_BUILD="old"
-  if [ ! -f /usr/lib/ISOLINUX/isohdpfx.bin ]; then
-    echo "ERROR! Unable to find /usr/lib/ISOLINUX/isohdpfx.bin. Installing now..."
-    apt-get -y install isolinux
-  fi
+  require_file /usr/lib/ISOLINUX/isohdpfx.bin isolinux
 else
   ISO_BUILD="new"
-  if [ ! -f /usr/share/cd-boot-images-amd64/images/boot/grub/efi.img ]; then
-    echo "ERROR! Unable to find /usr/share/cd-boot-images-amd64/images/boot/grub/efi.img. Installing now..."
-    apt-get -y install cd-boot-images-amd64
-  fi
+  require_file /usr/share/cd-boot-images-amd64/images/boot/grub/efi.img cd-boot-images-amd64
 fi
 
-if [ -f "${MNT_IN}/.disk/info" ] && [ -f "${MNT_IN}/casper/filesystem.squashfs" ]; then
+SQUASH_REL=$(find_squashfs_image "${MNT_IN}/casper") || die "Could not find a supported casper squashfs image."
+SQUASH_IN="${MNT_IN}/${SQUASH_REL}"
+SQUASH_TARGET="${MNT_OUT}/${SQUASH_REL}"
+SQUASH_SIZE="${MNT_OUT}/${SQUASH_REL%.squashfs}.size"
+SQUASH_COMP=$(unsquashfs -s "${SQUASH_IN}" | awk -F: '/Compression/ {gsub(/^[ \t]+/, "", $2); print tolower($2); exit}')
+
+if [ -f "${MNT_IN}/.disk/info" ] && [ -f "${SQUASH_IN}" ]; then
   FLAVOUR=$(cut -d' ' -f1 < "${MNT_IN}/.disk/info")
   VERSION=$(cut -d' ' -f2 < "${MNT_IN}/.disk/info")
   CODENAME=$(cut -d'"' -f2 < "${MNT_IN}/.disk/info")
   echo "Modifying ${FLAVOUR} ${VERSION} (${CODENAME}) for the ${UMPC}"
+  echo "Using ${SQUASH_REL} as the root filesystem image"
+  echo "Preserving ${SQUASH_COMP:-default} squashfs compression"
 
   rsync -aHAXx --delete --quiet \
-    --exclude=/casper/filesystem.squashfs \
-    --exclude=/casper/filesystem.squashfs.gpg \
+    --exclude="/${SQUASH_REL}" \
+    --exclude="/${SQUASH_REL}.gpg" \
     --exclude=/md5sum.txt \
-    "${MNT_IN}/" "${MNT_OUT}/" 2>&1 >/dev/null
+    "${MNT_IN}/" "${MNT_OUT}/" >/dev/null
 
   # Extract the contents of the squashfs
   unsquashfs -f -d "${SQUASH_OUT}" "${SQUASH_IN}"
   umount -l "${MNT_IN}"
 else
   echo "ERROR! This doesn't look like an Ubuntu iso image."
-  umount -l "${MNT_IN}"
-  clean_up
   exit 1
 fi
 
@@ -370,18 +441,25 @@ esac
 #echo
 
 # Update filesystem size
-du -sx --block-size=1 "${SQUASH_OUT}" | cut -f1 > "${MNT_OUT}/casper/filesystem.size"
+du -sx --block-size=1 "${SQUASH_OUT}" | cut -f1 > "${SQUASH_SIZE}"
 
-# Repack squahsfs
-rm -f "${MNT_OUT}/casper/filesystem.squashfs" 2>/dev/null
-mksquashfs "${SQUASH_OUT}" "${MNT_OUT}/casper/filesystem.squashfs"
+# Repack squashfs
+rm -f "${SQUASH_TARGET}" 2>/dev/null
+case "${SQUASH_COMP}" in
+  gzip|lzma|lzo|lz4|xz|zstd)
+    mksquashfs "${SQUASH_OUT}" "${SQUASH_TARGET}" -comp "${SQUASH_COMP}"
+    ;;
+  *)
+    mksquashfs "${SQUASH_OUT}" "${SQUASH_TARGET}"
+    ;;
+esac
 echo "Cleaning up..."
 echo "  - ${SQUASH_OUT}"
 rm -rf "${SQUASH_OUT}"
 sync
 
 # Collect md5sums
-find "${MNT_OUT}" -type f -print0 | xargs -0 md5sum | sed 's|'"${MNT_OUT}"'|\.|g' > "${MNT_OUT}/md5sum.txt"
+find "${MNT_OUT}" -type f ! -path "${MNT_OUT}/md5sum.txt" -print0 | xargs -0 md5sum | sed 's|'"${MNT_OUT}"'|\.|g' > "${MNT_OUT}/md5sum.txt"
 
 VOL_ID=$(echo "${FLAVOUR}-${VERSION}-${UMPC}" | cut -c1-31)
 rm -f "${ISO_OUT}" 2>/dev/null
@@ -428,5 +506,6 @@ case ${ISO_BUILD} in
   -V "${VOL_ID}" \
   -o "${ISO_OUT}" "${MNT_OUT}/";;
 esac
-chown -v "${SUDO_USER}":"${SUDO_USER}" "${ISO_OUT}"
-clean_up
+if [ -n "${SUDO_USER:-}" ] && id "${SUDO_USER}" >/dev/null 2>&1; then
+  chown -v "${SUDO_USER}":"${SUDO_USER}" "${ISO_OUT}"
+fi

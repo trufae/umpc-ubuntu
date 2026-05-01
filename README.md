@@ -88,7 +88,38 @@ When a HDMI display is connected, the touch coordinates on the internal display 
 ## The Scripts
 
 These scripts have been tested on [Ubuntu MATE](https://ubuntu-mate.org) 20.04.1.
-All Ubuntu flavours should work although if you use Wayland your mileage may vary.
+They have also been updated to handle the official Ubuntu 26.04 Desktop ISO
+layout. All Ubuntu flavours should work although if you use Wayland your
+mileage may vary.
+
+### Ubuntu 26.04 GPD Pocket image
+
+To download the official Ubuntu 26.04 Desktop ISO, verify it, and respin it for
+the original GPD Pocket:
+
+```bash
+./build-ubuntu26-image.sh
+```
+
+The wrapper downloads the base ISO into `downloads/` and then calls
+`umpc-ubuntu-respin.sh` with `sudo`. Missing local build packages are installed
+by the respin script when needed.
+If `sudo` is not available, the wrapper falls back to a rootless GPD Pocket
+builder that preserves the official ISO boot metadata with `xorriso`.
+
+The generated image is:
+
+```bash
+ubuntu-26.04-desktop-amd64-gpd-pocket.iso
+```
+
+Flash it to a USB drive with your preferred image writer, or from the command
+line after replacing `/dev/sdX` with the USB device:
+
+```bash
+lsblk
+sudo dd if=ubuntu-26.04-desktop-amd64-gpd-pocket.iso of=/dev/sdX bs=4M status=progress oflag=sync
+```
 
 ### umpc-ubuntu.sh
 
@@ -100,14 +131,14 @@ git clone https://github.com/wimpysworld/umpc-ubuntu.git
 cd umpc-ubuntu
 ```
 
-Edit `./umpc-ubuntu.sh` and change `UMPC="gpd-pocket3"` at the top of the script
-to match your computer, supported options are: `gpd-pocket`, `gpd-pocket2`,
-`gpd-pocket3`, `gpd-p2-max`, `gpd-micropc`, `gpd-win2`, `gpd-win-max` or `topjoy-falcon`.
+Set `UMPC` to match your computer, supported options are: `gpd-pocket`,
+`gpd-pocket2`, `gpd-pocket3`, `gpd-p2-max`, `gpd-micropc`, `gpd-win2`,
+`gpd-win3`, `gpd-win-max` or `topjoy-falcon`.
 
 Then run the script to enable the configuration tweaks.
 
 ```bash
-sudo ./umpc-ubuntu.sh enable
+sudo UMPC=gpd-pocket ./umpc-ubuntu.sh enable
 ```
 
 ### umpc-ubuntu-respin.sh
