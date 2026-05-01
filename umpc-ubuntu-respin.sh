@@ -86,6 +86,14 @@ function find_squashfs_image() {
   return 1
 }
 
+function add_live_boot_args() {
+  local FILE="${1}"
+  local ARGS="${2}"
+
+  [ -f "${FILE}" ] || return 0
+  sed -i "s/quiet splash/${ARGS}/g" "${FILE}"
+}
+
 # Copy file from /data to it's intended location
 function inject_data() {
   local TARGET_FILE="${1}"
@@ -301,8 +309,8 @@ case ${UMPC} in
 
     # Frame buffer rotation
     sed -i 's/GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="fbcon=rotate:1/' "${GRUB_DEFAULT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 fsck.mode=skip quiet splash/g' "${GRUB_BOOT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 fsck.mode=skip quiet splash/g' "${GRUB_LOOPBACK_CONF}"
+    add_live_boot_args "${GRUB_BOOT_CONF}" "fbcon=rotate:1 fsck.mode=skip"
+    add_live_boot_args "${GRUB_LOOPBACK_CONF}" "fbcon=rotate:1 fsck.mode=skip"
 
     # Increase console font size
     sed -i 's/FONTSIZE="8x16"/FONTSIZE="16x32"/' "${CONSOLE_CONF}"
@@ -315,8 +323,8 @@ case ${UMPC} in
   gpd-pocket2)
     # Frame buffer rotation
     sed -i 's/GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="fbcon=rotate:1/' "${GRUB_DEFAULT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 fsck.mode=skip quiet splash/g' "${GRUB_BOOT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 fsck.mode=skip quiet splash/g' "${GRUB_LOOPBACK_CONF}"
+    add_live_boot_args "${GRUB_BOOT_CONF}" "fbcon=rotate:1 fsck.mode=skip"
+    add_live_boot_args "${GRUB_LOOPBACK_CONF}" "fbcon=rotate:1 fsck.mode=skip"
 
     # Increase console font size
     sed -i 's/FONTSIZE="8x16"/FONTSIZE="16x32"/' "${CONSOLE_CONF}"
@@ -334,8 +342,8 @@ case ${UMPC} in
     #  - Patches are being worked on, more info here:
     #    https://ubuntu-mate.community/t/gpd-pocket-3-s3-sleep-waiting-for-kernel-fix/25053/
     sed -i 's/GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up mem_sleep_default=s2idle/' "${GRUB_DEFAULT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip quiet splash/g' "${GRUB_BOOT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip quiet splash/g' "${GRUB_LOOPBACK_CONF}"
+    add_live_boot_args "${GRUB_BOOT_CONF}" "fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip"
+    add_live_boot_args "${GRUB_LOOPBACK_CONF}" "fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip"
 
     # Increase console font size
     sed -i 's/FONTSIZE="8x16"/FONTSIZE="16x32"/' "${CONSOLE_CONF}"
@@ -357,15 +365,15 @@ case ${UMPC} in
   gpd-micropc)
     # Frame buffer rotation
     sed -i 's/GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="fbcon=rotate:1/' "${GRUB_DEFAULT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 fsck.mode=skip quiet splash/g' "${GRUB_BOOT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 fsck.mode=skip quiet splash/g' "${GRUB_LOOPBACK_CONF}"
+    add_live_boot_args "${GRUB_BOOT_CONF}" "fbcon=rotate:1 fsck.mode=skip"
+    add_live_boot_args "${GRUB_LOOPBACK_CONF}" "fbcon=rotate:1 fsck.mode=skip"
     ;;
   gpd-win2)
     # Frame buffer rotation
     # s2idle is required to wake from suspend.
     sed -i 's/GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="fbcon=rotate:1 video=eDP-1:panel_orientation=right_side_up mem_sleep_default=s2idle/' "${GRUB_DEFAULT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 video=eDP-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip quiet splash/g' "${GRUB_BOOT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 video=eDP-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip quiet splash/g' "${GRUB_LOOPBACK_CONF}"
+    add_live_boot_args "${GRUB_BOOT_CONF}" "fbcon=rotate:1 video=eDP-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip"
+    add_live_boot_args "${GRUB_LOOPBACK_CONF}" "fbcon=rotate:1 video=eDP-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip"
     ;;
   gpd-win3)
     # Frame buffer rotation and s2idle by default.
@@ -375,8 +383,8 @@ case ${UMPC} in
     #  - Patches are being worked on, more info here:
     #    https://ubuntu-mate.community/t/gpd-pocket-3-s3-sleep-waiting-for-kernel-fix/25053/
     sed -i 's/GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up mem_sleep_default=s2idle/' "${GRUB_DEFAULT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip quiet splash/g' "${GRUB_BOOT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip quiet splash/g' "${GRUB_LOOPBACK_CONF}"
+    add_live_boot_args "${GRUB_BOOT_CONF}" "fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip"
+    add_live_boot_args "${GRUB_LOOPBACK_CONF}" "fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up mem_sleep_default=s2idle fsck.mode=skip"
 
     # Might need a workaround for the touch screen.
     # > "My touch screen does work if I "modprobe -r goodix && modprobe goodix"
@@ -389,22 +397,22 @@ case ${UMPC} in
     case "${VERSION}" in
       22*)
         sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"fbcon=rotate:1 video=eDP-1:800x1280/" "${GRUB_DEFAULT_CONF}"
-        sed -i "s/quiet splash/fbcon=rotate:1 video=eDP-1:800x1280 fsck.mode=skip quiet splash/g" "${GRUB_BOOT_CONF}"
-        sed -i "s/quiet splash/fbcon=rotate:1 video=eDP-1:800x1280 fsck.mode=skip quiet splash/g" "${GRUB_LOOPBACK_CONF}"
+        add_live_boot_args "${GRUB_BOOT_CONF}" "fbcon=rotate:1 video=eDP-1:800x1280 fsck.mode=skip"
+        add_live_boot_args "${GRUB_LOOPBACK_CONF}" "fbcon=rotate:1 video=eDP-1:800x1280 fsck.mode=skip"
         ;;
       *)
         inject_data "${SQUASH_OUT}/usr/lib/firmware/edid/${UMPC}-edid.bin"
         sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"fbcon=rotate:1 video=eDP-1:800x1280 drm.edid_firmware=eDP-1:edid\/${UMPC}-edid.bin/" "${GRUB_DEFAULT_CONF}"
-        sed -i "s/quiet splash/fbcon=rotate:1 video=eDP-1:800x1280 drm.edid_firmware=eDP-1:edid\/${UMPC}-edid.bin fsck.mode=skip quiet splash/g" "${GRUB_BOOT_CONF}"
-        sed -i "s/quiet splash/fbcon=rotate:1 video=eDP-1:800x1280 drm.edid_firmware=eDP-1:edid\/${UMPC}-edid.bin fsck.mode=skip quiet splash/g" "${GRUB_LOOPBACK_CONF}"
+        add_live_boot_args "${GRUB_BOOT_CONF}" "fbcon=rotate:1 video=eDP-1:800x1280 drm.edid_firmware=eDP-1:edid\/${UMPC}-edid.bin fsck.mode=skip"
+        add_live_boot_args "${GRUB_LOOPBACK_CONF}" "fbcon=rotate:1 video=eDP-1:800x1280 drm.edid_firmware=eDP-1:edid\/${UMPC}-edid.bin fsck.mode=skip"
         ;;
     esac
     ;;
   topjoy-falcon)
     # Frame buffer rotation
     sed -i 's/GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up /' "${GRUB_DEFAULT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up fsck.mode=skip quiet splash/g' "${GRUB_BOOT_CONF}"
-    sed -i 's/quiet splash/fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up fsck.mode=skip quiet splash/g' "${GRUB_LOOPBACK_CONF}"
+    add_live_boot_args "${GRUB_BOOT_CONF}" "fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up fsck.mode=skip"
+    add_live_boot_args "${GRUB_LOOPBACK_CONF}" "fbcon=rotate:1 video=DSI-1:panel_orientation=right_side_up fsck.mode=skip"
 
     # Increase console font size
     sed -i 's/FONTSIZE="8x16"/FONTSIZE="16x32"/' "${CONSOLE_CONF}"
