@@ -132,6 +132,116 @@ function add_live_boot_args() {
   sed -i "s/quiet splash/${ARGS}/g" "${FILE}"
 }
 
+function patch_casper_bottom_scripts() {
+  local CASPER_BOTTOM="${1}"
+
+  [ -d "${CASPER_BOTTOM}" ] || die "Could not find casper-bottom scripts in initrd."
+
+  cat > "${CASPER_BOTTOM}/22sslcert" <<'EOF'
+#! /bin/sh
+
+PREREQ=""
+DESCRIPTION="Skipping SSL certificate regeneration for offline live boot..."
+
+prereqs()
+{
+       echo "$PREREQ"
+}
+
+case $1 in
+prereqs)
+       prereqs
+       exit 0
+       ;;
+esac
+
+. /scripts/casper-functions
+
+log_begin_msg "$DESCRIPTION"
+log_end_msg
+EOF
+  chmod 755 "${CASPER_BOTTOM}/22sslcert"
+
+  cat > "${CASPER_BOTTOM}/41apt_build_cache_cdrom" <<'EOF'
+#! /bin/sh
+
+PREREQ=""
+DESCRIPTION="Skipping APT cache generation for offline live boot..."
+
+prereqs()
+{
+       echo "$PREREQ"
+}
+
+case $1 in
+prereqs)
+       prereqs
+       exit 0
+       ;;
+esac
+
+. /scripts/casper-functions
+
+log_begin_msg "$DESCRIPTION"
+log_end_msg
+EOF
+  chmod 755 "${CASPER_BOTTOM}/41apt_build_cache_cdrom"
+}
+
+function append_cpio_archive() {
+  local SOURCE_DIR="${1}"
+  local OUT_FILE="${2}"
+
+  [ -d "${SOURCE_DIR}" ] || return 0
+  (
+    cd "${SOURCE_DIR}"
+    find . -print0 |
+      sort -z |
+      cpio --null --quiet --reproducible --owner=0:0 -o -H newc
+  ) >> "${OUT_FILE}"
+}
+
+function append_compressed_cpio_archive() {
+  local SOURCE_DIR="${1}"
+  local OUT_FILE="${2}"
+
+  (
+    cd "${SOURCE_DIR}"
+    find . -print0 |
+      sort -z |
+      cpio --null --quiet --reproducible --owner=0:0 -o -H newc |
+      zstd -q -19 -T0
+  ) >> "${OUT_FILE}"
+}
+
+function patch_live_initrd() {
+  local INITRD_IN="${1}"
+  local INITRD_OUT="${2}"
+  local INITRD_ROOT="${3}"
+  local MAIN_DIR
+  local EARLY_DIR
+
+  rm -rf "${INITRD_ROOT}"
+  mkdir -p "${INITRD_ROOT}"
+  TMPDIR="${WORKDIR}" unmkinitramfs "${INITRD_IN}" "${INITRD_ROOT}" >/dev/null
+
+  if [ -d "${INITRD_ROOT}/main/scripts/casper-bottom" ]; then
+    MAIN_DIR="${INITRD_ROOT}/main"
+  else
+    MAIN_DIR="${INITRD_ROOT}"
+  fi
+
+  patch_casper_bottom_scripts "${MAIN_DIR}/scripts/casper-bottom"
+
+  : > "${INITRD_OUT}"
+  if [ "${MAIN_DIR}" != "${INITRD_ROOT}" ]; then
+    for EARLY_DIR in "${INITRD_ROOT}"/early*; do
+      append_cpio_archive "${EARLY_DIR}" "${INITRD_OUT}"
+    done
+  fi
+  append_compressed_cpio_archive "${MAIN_DIR}" "${INITRD_OUT}"
+}
+
 function clean_up() {
   if [ -n "${WORKDIR:-}" ] && [ -d "${WORKDIR}" ]; then
     echo "Cleaning up ${WORKDIR}"
@@ -156,7 +266,7 @@ ISO_IN="${1:-}"
 [ -n "${ISO_IN}" ] || die "You must provide the filename of an Ubuntu iso image."
 [ -f "${ISO_IN}" ] || die "Can not access ${ISO_IN}."
 
-for CMD in awk chmod cp du grep isoinfo md5sum mksquashfs mv rm sed sort unsquashfs xorriso; do
+for CMD in awk chmod cp cpio du find grep isoinfo md5sum mksquashfs mv rm sed sort unmkinitramfs unsquashfs xorriso zstd; do
   require_command "${CMD}"
 done
 
@@ -176,6 +286,10 @@ INFO_FILE="${WORKDIR}/info"
 MD5_FILE="${WORKDIR}/md5sum.txt"
 GRUB_BOOT_CONF="${WORKDIR}/grub.cfg"
 GRUB_LOOPBACK_CONF="${WORKDIR}/loopback.cfg"
+INITRD_REL="casper/initrd"
+INITRD_IN="${WORKDIR}/initrd"
+INITRD_NEW="${WORKDIR}/initrd-new"
+INITRD_ROOT="${WORKDIR}/initrd-root"
 SQUASH_IN="${WORKDIR}/$(basename "${SQUASH_REL}")"
 SQUASH_OUT="${WORKDIR}/squashfs-root"
 SQUASH_NEW="${WORKDIR}/$(basename "${SQUASH_REL%.squashfs}")-new.squashfs"
@@ -186,6 +300,7 @@ extract_from_iso "${ISO_IN}" "/.disk/info" "${INFO_FILE}"
 extract_from_iso "${ISO_IN}" "/md5sum.txt" "${MD5_FILE}"
 extract_from_iso "${ISO_IN}" "/boot/grub/grub.cfg" "${GRUB_BOOT_CONF}"
 extract_from_iso "${ISO_IN}" "/boot/grub/loopback.cfg" "${GRUB_LOOPBACK_CONF}"
+extract_from_iso "${ISO_IN}" "/${INITRD_REL}" "${INITRD_IN}"
 extract_from_iso "${ISO_IN}" "/${SQUASH_REL}" "${SQUASH_IN}"
 
 FLAVOUR=$(cut -d' ' -f1 < "${INFO_FILE}")
@@ -236,6 +351,8 @@ add_live_boot_args "${GRUB_BOOT_CONF}" "fbcon=rotate:1 fsck.mode=skip"
 add_live_boot_args "${GRUB_LOOPBACK_CONF}" "fbcon=rotate:1 fsck.mode=skip"
 sed -i 's/FONTSIZE="8x16"/FONTSIZE="16x32"/' "${CONSOLE_CONF}"
 
+patch_live_initrd "${INITRD_IN}" "${INITRD_NEW}" "${INITRD_ROOT}"
+
 inject_data "${SQUASH_OUT}/usr/bin/umpc-display-scaler"
 inject_data "${SQUASH_OUT}/etc/xdg/autostart/umpc-display-scaler.desktop"
 inject_data "${SQUASH_OUT}/usr/share/applications/umpc-display-scaler.desktop"
@@ -252,6 +369,7 @@ mksquashfs "${MKSQUASHFS_ARGS[@]}"
 
 update_md5sum "${MD5_FILE}" "boot/grub/grub.cfg" "${GRUB_BOOT_CONF}"
 update_md5sum "${MD5_FILE}" "boot/grub/loopback.cfg" "${GRUB_LOOPBACK_CONF}"
+update_md5sum "${MD5_FILE}" "${INITRD_REL}" "${INITRD_NEW}"
 update_md5sum "${MD5_FILE}" "${SQUASH_SIZE_REL}" "${SQUASH_SIZE}"
 update_md5sum "${MD5_FILE}" "${SQUASH_REL}" "${SQUASH_NEW}"
 
@@ -265,6 +383,7 @@ xorriso \
   -overwrite on \
   -map "${GRUB_BOOT_CONF}" /boot/grub/grub.cfg \
   -map "${GRUB_LOOPBACK_CONF}" /boot/grub/loopback.cfg \
+  -map "${INITRD_NEW}" "/${INITRD_REL}" \
   -map "${SQUASH_SIZE}" "/${SQUASH_SIZE_REL}" \
   -map "${SQUASH_NEW}" "/${SQUASH_REL}" \
   -map "${MD5_FILE}" /md5sum.txt \

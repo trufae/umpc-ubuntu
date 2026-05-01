@@ -94,6 +94,116 @@ function add_live_boot_args() {
   sed -i "s/quiet splash/${ARGS}/g" "${FILE}"
 }
 
+function patch_casper_bottom_scripts() {
+  local CASPER_BOTTOM="${1}"
+
+  [ -d "${CASPER_BOTTOM}" ] || die "Could not find casper-bottom scripts in initrd."
+
+  cat > "${CASPER_BOTTOM}/22sslcert" <<'EOF'
+#! /bin/sh
+
+PREREQ=""
+DESCRIPTION="Skipping SSL certificate regeneration for offline live boot..."
+
+prereqs()
+{
+       echo "$PREREQ"
+}
+
+case $1 in
+prereqs)
+       prereqs
+       exit 0
+       ;;
+esac
+
+. /scripts/casper-functions
+
+log_begin_msg "$DESCRIPTION"
+log_end_msg
+EOF
+  chmod 755 "${CASPER_BOTTOM}/22sslcert"
+
+  cat > "${CASPER_BOTTOM}/41apt_build_cache_cdrom" <<'EOF'
+#! /bin/sh
+
+PREREQ=""
+DESCRIPTION="Skipping APT cache generation for offline live boot..."
+
+prereqs()
+{
+       echo "$PREREQ"
+}
+
+case $1 in
+prereqs)
+       prereqs
+       exit 0
+       ;;
+esac
+
+. /scripts/casper-functions
+
+log_begin_msg "$DESCRIPTION"
+log_end_msg
+EOF
+  chmod 755 "${CASPER_BOTTOM}/41apt_build_cache_cdrom"
+}
+
+function append_cpio_archive() {
+  local SOURCE_DIR="${1}"
+  local OUT_FILE="${2}"
+
+  [ -d "${SOURCE_DIR}" ] || return 0
+  (
+    cd "${SOURCE_DIR}"
+    find . -print0 |
+      sort -z |
+      cpio --null --quiet --reproducible --owner=0:0 -o -H newc
+  ) >> "${OUT_FILE}"
+}
+
+function append_compressed_cpio_archive() {
+  local SOURCE_DIR="${1}"
+  local OUT_FILE="${2}"
+
+  (
+    cd "${SOURCE_DIR}"
+    find . -print0 |
+      sort -z |
+      cpio --null --quiet --reproducible --owner=0:0 -o -H newc |
+      zstd -q -19 -T0
+  ) >> "${OUT_FILE}"
+}
+
+function patch_live_initrd() {
+  local INITRD_IN="${1}"
+  local INITRD_OUT="${2}"
+  local INITRD_ROOT="${3}"
+  local MAIN_DIR
+  local EARLY_DIR
+
+  rm -rf "${INITRD_ROOT}"
+  mkdir -p "${INITRD_ROOT}"
+  TMPDIR="${WORKDIR}" unmkinitramfs "${INITRD_IN}" "${INITRD_ROOT}" >/dev/null
+
+  if [ -d "${INITRD_ROOT}/main/scripts/casper-bottom" ]; then
+    MAIN_DIR="${INITRD_ROOT}/main"
+  else
+    MAIN_DIR="${INITRD_ROOT}"
+  fi
+
+  patch_casper_bottom_scripts "${MAIN_DIR}/scripts/casper-bottom"
+
+  : > "${INITRD_OUT}"
+  if [ "${MAIN_DIR}" != "${INITRD_ROOT}" ]; then
+    for EARLY_DIR in "${INITRD_ROOT}"/early*; do
+      append_cpio_archive "${EARLY_DIR}" "${INITRD_OUT}"
+    done
+  fi
+  append_compressed_cpio_archive "${MAIN_DIR}" "${INITRD_OUT}"
+}
+
 # Copy file from /data to it's intended location
 function inject_data() {
   local TARGET_FILE="${1}"
@@ -147,6 +257,9 @@ require_command unsquashfs squashfs-tools
 require_command mksquashfs squashfs-tools
 require_command rsync rsync
 require_command gcc gcc
+require_command cpio cpio
+require_command unmkinitramfs initramfs-tools-core
+require_command zstd zstd
 
 
 UMPC=""
@@ -201,6 +314,9 @@ GRUB_DEFAULT_CONF="${SQUASH_OUT}/etc/default/grub"
 GRUB_D_CONF="${SQUASH_OUT}/etc/default/grub.d/${UMPC}.cfg"
 GRUB_BOOT_CONF="${MNT_OUT}/boot/grub/grub.cfg"
 GRUB_LOOPBACK_CONF="${MNT_OUT}/boot/grub/loopback.cfg"
+INITRD_TARGET="${MNT_OUT}/casper/initrd"
+INITRD_NEW="${WORKDIR}/initrd-new"
+INITRD_ROOT="${WORKDIR}/initrd-root"
 CONSOLE_CONF="${SQUASH_OUT}/etc/default/console-setup"
 GSCHEMA_OVERRIDE="${SQUASH_OUT}/usr/share/glib-2.0/schemas/90-${UMPC}.gschema.override"
 HWDB_CONF="${SQUASH_OUT}/etc/udev/hwdb.d/61-${UMPC}-sensor-local.hwdb"
@@ -432,6 +548,12 @@ case ${UMPC} in
     exit 1
     ;;
 esac
+
+# Disable live-boot work that is slow or noisy on an offline USB image.
+if [ -f "${INITRD_TARGET}" ]; then
+  patch_live_initrd "${INITRD_TARGET}" "${INITRD_NEW}" "${INITRD_ROOT}"
+  mv "${INITRD_NEW}" "${INITRD_TARGET}"
+fi
 
 #echo
 #echo "Modified : ${GRUB_DEFAULT_CONF}"
