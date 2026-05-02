@@ -29,6 +29,15 @@ function require_command() {
   command -v "${1}" >/dev/null 2>&1 || die "Unable to find required command: ${1}"
 }
 
+function enter_fakeroot() {
+  if [ "$(id -u)" -eq 0 ] || [ -n "${FAKEROOTKEY:-}" ]; then
+    return
+  fi
+
+  require_command fakeroot
+  exec fakeroot -- "${0}" "${@}"
+}
+
 function extract_from_iso() {
   local ISO_PATH="${1}"
   local ISO_FILE="${2}"
@@ -105,23 +114,6 @@ function update_md5sum() {
     { print }
   ' "${MD5_FILE}" > "${TMP_FILE}"
   mv "${TMP_FILE}" "${MD5_FILE}"
-}
-
-function write_dev_pseudo_file() {
-  local PSEUDO_FILE="${1}"
-
-  cat > "${PSEUDO_FILE}" <<'EOF'
-dev/console c 666 0 0 5 1
-dev/full c 666 0 0 1 7
-dev/null c 666 0 0 1 3
-dev/ptmx c 666 0 0 5 2
-dev/random c 666 0 0 1 8
-dev/tty c 666 0 0 5 0
-dev/urandom c 666 0 0 1 9
-dev/zero c 666 0 0 1 5
-var/lib/apt/lists/auxfiles m 755 42 0
-var/lib/apt/lists/partial m 700 42 0
-EOF
 }
 
 function add_live_boot_args() {
@@ -267,6 +259,7 @@ function clean_up() {
   fi
 }
 
+ORIGINAL_ARGS=("$@")
 UMPC=""
 OPTSTRING=d:h
 while getopts ${OPTSTRING} OPT; do
@@ -277,6 +270,9 @@ while getopts ${OPTSTRING} OPT; do
   esac
 done
 shift "$((OPTIND - 1))"
+
+enter_fakeroot "${ORIGINAL_ARGS[@]}"
+
 ISO_IN="${1:-}"
 
 [ -n "${UMPC}" ] || die "You must supply a device with -d."
@@ -312,7 +308,6 @@ SQUASH_IN="${WORKDIR}/$(basename "${SQUASH_REL}")"
 SQUASH_OUT="${WORKDIR}/squashfs-root"
 SQUASH_NEW="${WORKDIR}/$(basename "${SQUASH_REL%.squashfs}")-new.squashfs"
 SQUASH_SIZE="${WORKDIR}/$(basename "${SQUASH_SIZE_REL}")"
-PSEUDO_FILE="${WORKDIR}/rootfs.pseudo"
 
 extract_from_iso "${ISO_IN}" "/.disk/info" "${INFO_FILE}"
 extract_from_iso "${ISO_IN}" "/md5sum.txt" "${MD5_FILE}"
@@ -339,9 +334,7 @@ echo "Modifying ${FLAVOUR} ${VERSION} (${CODENAME}) for the ${UMPC}"
 echo "Using ${SQUASH_REL} as the root filesystem image"
 echo "Preserving ${SQUASH_COMP:-default} squashfs compression"
 
-unsquashfs -no-xattrs -no-exit-code -f -d "${SQUASH_OUT}" "${SQUASH_IN}"
-chmod -R u+rwX "${SQUASH_OUT}"
-write_dev_pseudo_file "${PSEUDO_FILE}"
+unsquashfs -no-exit-code -f -d "${SQUASH_OUT}" "${SQUASH_IN}"
 
 XORG_CONF_PATH="${SQUASH_OUT}/usr/share/X11/xorg.conf.d"
 MODPROBE_CONF="${SQUASH_OUT}/etc/modprobe.d/alsa-${UMPC}.conf"
@@ -377,7 +370,7 @@ inject_data "${SQUASH_OUT}/usr/share/applications/umpc-display-scaler.desktop"
 
 du -sx --block-size=1 "${SQUASH_OUT}" | cut -f1 > "${SQUASH_SIZE}"
 
-MKSQUASHFS_ARGS=("${SQUASH_OUT}" "${SQUASH_NEW}" -noappend -processors "${MKSQUASHFS_PROCESSORS:-2}" -all-root -pf "${PSEUDO_FILE}" -pseudo-override)
+MKSQUASHFS_ARGS=("${SQUASH_OUT}" "${SQUASH_NEW}" -noappend -processors "${MKSQUASHFS_PROCESSORS:-2}")
 case "${SQUASH_COMP}" in
   gzip|lzma|lzo|lz4|xz|zstd)
     MKSQUASHFS_ARGS+=(-comp "${SQUASH_COMP}")
