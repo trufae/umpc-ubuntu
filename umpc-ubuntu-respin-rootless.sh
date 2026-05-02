@@ -129,7 +129,24 @@ function add_live_boot_args() {
   local ARGS="${2}"
 
   [ -f "${FILE}" ] || return 0
+  if [[ " ${ARGS} " != *" nopersistent "* ]]; then
+    ARGS="${ARGS} nopersistent"
+  fi
   sed -i "s/quiet splash/${ARGS}/g" "${FILE}"
+}
+
+function disable_persistent_partition_creation() {
+  local CASPER_HELPERS="${1}"
+
+  [ -f "${CASPER_HELPERS}" ] || die "Could not find casper-helpers in initrd."
+
+  cat >> "${CASPER_HELPERS}" <<'EOF'
+
+# UMPC Ubuntu images are meant to boot without modifying the USB stick.
+find_or_create_persistent_partition () {
+    return 0
+}
+EOF
 }
 
 function patch_casper_bottom_scripts() {
@@ -232,6 +249,7 @@ function patch_live_initrd() {
   fi
 
   patch_casper_bottom_scripts "${MAIN_DIR}/scripts/casper-bottom"
+  disable_persistent_partition_creation "${MAIN_DIR}/scripts/casper-helpers"
 
   : > "${INITRD_OUT}"
   if [ "${MAIN_DIR}" != "${INITRD_ROOT}" ]; then
