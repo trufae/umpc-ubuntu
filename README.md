@@ -114,7 +114,9 @@ removed full install source such as LibreOffice, Thunderbird, Transmission,
 Remmina, Rhythmbox, and Shotwell. It also adds a first-boot service that purges
 the Firefox wrapper package and installs `epiphany-browser` from the Ubuntu
 repositories once networking is available. This image expects networking during
-installation.
+installation. A tiny empty `minimal.standard.squashfs` placeholder is kept
+because Ubuntu's live initrd derives required lower layers from
+`minimal.standard.live.squashfs` during boot.
 
 The wrapper downloads the base ISO into `downloads/` and then calls
 `umpc-ubuntu-respin.sh` with `sudo`. Missing local build packages are installed

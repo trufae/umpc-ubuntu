@@ -292,6 +292,23 @@ function keep_minimal_install_source() {
   mv "${TMP_FILE}" "${INSTALL_SOURCES}"
 }
 
+function create_empty_layer() {
+  local LAYER_FILE="${1}"
+  local SIZE_FILE="${2}"
+  local MANIFEST_FILE="${3}"
+  local MANIFEST_FULL_FILE="${4}"
+  local EMPTY_DIR="${WORKDIR}/empty-layer"
+
+  rm -rf "${EMPTY_DIR}"
+  mkdir -p "${EMPTY_DIR}"
+  du -sx --block-size=1 "${EMPTY_DIR}" | cut -f1 > "${SIZE_FILE}"
+  : > "${MANIFEST_FILE}"
+  : > "${MANIFEST_FULL_FILE}"
+
+  rm -f "${LAYER_FILE}"
+  mksquashfs "${EMPTY_DIR}" "${LAYER_FILE}" -noappend -comp xz >/dev/null
+}
+
 function prune_slim_online_manifest() {
   local MANIFEST="${1}"
   local TMP_FILE="${MANIFEST}.tmp"
@@ -394,6 +411,14 @@ function remove_seeded_snap() {
     rm -f "${ROOT}/snap/bin/geckodriver"
   fi
 
+  rm -f "${ROOT}/etc/systemd/system/snap-${SNAP_NAME}-"*.mount
+  rm -f "${ROOT}/etc/systemd/system/multi-user.target.wants/snap-${SNAP_NAME}-"*.mount
+  rm -f "${ROOT}/etc/systemd/system/snapd.mounts.target.wants/snap-${SNAP_NAME}-"*.mount
+  rm -f "${ROOT}/etc/udev/rules.d/"*snap.${SNAP_NAME}.rules
+  rm -f "${ROOT}/var/cache/apparmor/"*/snap.${SNAP_NAME}.*
+  rm -f "${ROOT}/var/cache/apparmor/"*/snap-update-ns.${SNAP_NAME}
+  rm -rf "${ROOT}/var/snap/${SNAP_NAME}"
+
   rm -f "${ROOT}/var/lib/snapd/seed/snaps/${SNAP_NAME}_"*.snap
   rm -f "${ROOT}/var/lib/snapd/snaps/${SNAP_NAME}_"*.snap
   rm -f "${ROOT}/var/lib/snapd/seed/assertions/${SNAP_NAME}_"*.assert
@@ -441,6 +466,7 @@ EOF
 Description=Install Epiphany browser for the UMPC online-slim image
 Wants=network-online.target
 After=network-online.target apt-daily.service apt-daily-upgrade.service snapd.seeded.service
+ConditionPathExists=!/cdrom/casper
 ConditionPathExists=!/var/lib/umpc-online-slim/epiphany-browser-installed
 
 [Service]
@@ -486,6 +512,11 @@ function apply_slim_online_iso_tree() {
     ! -name 'minimal.manifest.full' \
     ! -name 'minimal.standard.live.*' \
     -delete
+  create_empty_layer \
+    "${ISO_ROOT}/casper/minimal.standard.squashfs" \
+    "${ISO_ROOT}/casper/minimal.standard.size" \
+    "${ISO_ROOT}/casper/minimal.standard.manifest" \
+    "${ISO_ROOT}/casper/minimal.standard.manifest.full"
   keep_minimal_install_source "${ISO_ROOT}/casper/install-sources.yaml"
   while IFS= read -r -d '' MANIFEST; do
     prune_slim_online_manifest "${MANIFEST}"

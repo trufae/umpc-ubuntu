@@ -113,8 +113,13 @@ function update_md5sum() {
   SUM=$(md5sum "${DISK_PATH}" | awk '{print $1}')
   TMP_FILE="${MD5_FILE}.tmp"
   awk -v path="./${ISO_PATH}" -v sum="${SUM}" '
-    $2 == path { print sum "  " path; next }
+    $2 == path { print sum "  " path; found = 1; next }
     { print }
+    END {
+      if (!found) {
+        print sum "  " path
+      }
+    }
   ' "${MD5_FILE}" > "${TMP_FILE}"
   mv "${TMP_FILE}" "${MD5_FILE}"
 }
@@ -229,6 +234,23 @@ function keep_minimal_install_source() {
   mv "${TMP_FILE}" "${INSTALL_SOURCES}"
 }
 
+function create_empty_layer() {
+  local LAYER_FILE="${1}"
+  local SIZE_FILE="${2}"
+  local MANIFEST_FILE="${3}"
+  local MANIFEST_FULL_FILE="${4}"
+  local EMPTY_DIR="${WORKDIR}/empty-layer"
+
+  rm -rf "${EMPTY_DIR}"
+  mkdir -p "${EMPTY_DIR}"
+  du -sx --block-size=1 "${EMPTY_DIR}" | cut -f1 > "${SIZE_FILE}"
+  : > "${MANIFEST_FILE}"
+  : > "${MANIFEST_FULL_FILE}"
+
+  rm -f "${LAYER_FILE}"
+  mksquashfs "${EMPTY_DIR}" "${LAYER_FILE}" -noappend -processors "${MKSQUASHFS_PROCESSORS:-2}" -comp xz >/dev/null
+}
+
 function remove_snap_from_seed_yaml() {
   local SEED_YAML="${1}"
   local SNAP_NAME="${2}"
@@ -292,6 +314,14 @@ function remove_seeded_snap() {
     rm -f "${ROOT}/snap/bin/geckodriver"
   fi
 
+  rm -f "${ROOT}/etc/systemd/system/snap-${SNAP_NAME}-"*.mount
+  rm -f "${ROOT}/etc/systemd/system/multi-user.target.wants/snap-${SNAP_NAME}-"*.mount
+  rm -f "${ROOT}/etc/systemd/system/snapd.mounts.target.wants/snap-${SNAP_NAME}-"*.mount
+  rm -f "${ROOT}/etc/udev/rules.d/"*snap.${SNAP_NAME}.rules
+  rm -f "${ROOT}/var/cache/apparmor/"*/snap.${SNAP_NAME}.*
+  rm -f "${ROOT}/var/cache/apparmor/"*/snap-update-ns.${SNAP_NAME}
+  rm -rf "${ROOT}/var/snap/${SNAP_NAME}"
+
   rm -f "${ROOT}/var/lib/snapd/seed/snaps/${SNAP_NAME}_"*.snap
   rm -f "${ROOT}/var/lib/snapd/snaps/${SNAP_NAME}_"*.snap
   rm -f "${ROOT}/var/lib/snapd/seed/assertions/${SNAP_NAME}_"*.assert
@@ -339,6 +369,7 @@ EOF
 Description=Install Epiphany browser for the UMPC online-slim image
 Wants=network-online.target
 After=network-online.target apt-daily.service apt-daily-upgrade.service snapd.seeded.service
+ConditionPathExists=!/cdrom/casper
 ConditionPathExists=!/var/lib/umpc-online-slim/epiphany-browser-installed
 
 [Service]
@@ -634,6 +665,14 @@ LIVE_SQUASH_OUT=""
 LIVE_SQUASH_NEW=""
 LIVE_SQUASH_SIZE_REL=""
 LIVE_SQUASH_SIZE=""
+STANDARD_LAYER_REL="casper/minimal.standard.squashfs"
+STANDARD_LAYER="${WORKDIR}/minimal.standard-empty.squashfs"
+STANDARD_SIZE_REL="casper/minimal.standard.size"
+STANDARD_SIZE="${WORKDIR}/minimal.standard.size"
+STANDARD_MANIFEST_REL="casper/minimal.standard.manifest"
+STANDARD_MANIFEST="${WORKDIR}/minimal.standard.manifest"
+STANDARD_MANIFEST_FULL_REL="casper/minimal.standard.manifest.full"
+STANDARD_MANIFEST_FULL="${WORKDIR}/minimal.standard.manifest.full"
 MANIFEST_RELS=()
 MANIFEST_FILES=()
 
@@ -764,6 +803,7 @@ if [ "${SLIM_ONLINE}" -eq 1 ]; then
   for MANIFEST_FILE in "${MANIFEST_FILES[@]}"; do
     prune_slim_online_manifest "${MANIFEST_FILE}"
   done
+  create_empty_layer "${STANDARD_LAYER}" "${STANDARD_SIZE}" "${STANDARD_MANIFEST}" "${STANDARD_MANIFEST_FULL}"
   filter_md5sum_for_slim_online "${MD5_FILE}"
 fi
 
@@ -774,6 +814,10 @@ update_md5sum "${MD5_FILE}" "${SQUASH_SIZE_REL}" "${SQUASH_SIZE}"
 update_md5sum "${MD5_FILE}" "${SQUASH_REL}" "${SQUASH_NEW}"
 if [ "${SLIM_ONLINE}" -eq 1 ]; then
   update_md5sum "${MD5_FILE}" "${INSTALL_SOURCES_REL}" "${INSTALL_SOURCES}"
+  update_md5sum "${MD5_FILE}" "${STANDARD_LAYER_REL}" "${STANDARD_LAYER}"
+  update_md5sum "${MD5_FILE}" "${STANDARD_SIZE_REL}" "${STANDARD_SIZE}"
+  update_md5sum "${MD5_FILE}" "${STANDARD_MANIFEST_REL}" "${STANDARD_MANIFEST}"
+  update_md5sum "${MD5_FILE}" "${STANDARD_MANIFEST_FULL_REL}" "${STANDARD_MANIFEST_FULL}"
   for MANIFEST_INDEX in "${!MANIFEST_FILES[@]}"; do
     update_md5sum "${MD5_FILE}" "${MANIFEST_RELS[${MANIFEST_INDEX}]}" "${MANIFEST_FILES[${MANIFEST_INDEX}]}"
   done
@@ -800,6 +844,10 @@ if [ "${SLIM_ONLINE}" -eq 1 ]; then
     SLIM_XORRISO_ARGS+=(-rm "${SLIM_REMOVE_PATHS[@]}" --)
   fi
   SLIM_MAP_ARGS+=(-map "${INSTALL_SOURCES}" "/${INSTALL_SOURCES_REL}")
+  SLIM_MAP_ARGS+=(-map "${STANDARD_LAYER}" "/${STANDARD_LAYER_REL}")
+  SLIM_MAP_ARGS+=(-map "${STANDARD_SIZE}" "/${STANDARD_SIZE_REL}")
+  SLIM_MAP_ARGS+=(-map "${STANDARD_MANIFEST}" "/${STANDARD_MANIFEST_REL}")
+  SLIM_MAP_ARGS+=(-map "${STANDARD_MANIFEST_FULL}" "/${STANDARD_MANIFEST_FULL_REL}")
   for MANIFEST_INDEX in "${!MANIFEST_FILES[@]}"; do
     SLIM_MAP_ARGS+=(-map "${MANIFEST_FILES[${MANIFEST_INDEX}]}" "/${MANIFEST_RELS[${MANIFEST_INDEX}]}")
   done
