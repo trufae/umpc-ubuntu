@@ -101,6 +101,21 @@ the original GPD Pocket:
 ./build-ubuntu26-image.sh
 ```
 
+To build a smaller image for online installs, use:
+
+```bash
+./build-ubuntu26-image.sh --slim-online
+```
+
+The online-slim image removes the full desktop install source, the offline APT
+repository, optional language/enhanced-secureboot casper overlays, Firefox and
+Thunderbird snap payloads, and desktop applications that are only useful in the
+removed full install source such as LibreOffice, Thunderbird, Transmission,
+Remmina, Rhythmbox, and Shotwell. It also adds a first-boot service that purges
+the Firefox wrapper package and installs `epiphany-browser` from the Ubuntu
+repositories once networking is available. This image expects networking during
+installation.
+
 The wrapper downloads the base ISO into `downloads/` and then calls
 `umpc-ubuntu-respin.sh` with `sudo`. Missing local build packages are installed
 by the respin script when needed.

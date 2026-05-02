@@ -14,6 +14,9 @@ function usage() {
   echo "    -d"
   echo "        device modifications to apply. This rootless builder currently supports 'gpd-pocket'."
   echo
+  echo "    --slim-online"
+  echo "        remove offline/full-install payloads and install Epiphany online after setup."
+  echo
   echo "    -h"
   echo "        display this help and exit"
   echo
@@ -114,6 +117,300 @@ function update_md5sum() {
     { print }
   ' "${MD5_FILE}" > "${TMP_FILE}"
   mv "${TMP_FILE}" "${MD5_FILE}"
+}
+
+function filter_md5sum_for_slim_online() {
+  local MD5_FILE="${1}"
+  local TMP_FILE="${MD5_FILE}.tmp"
+
+  awk '
+    {
+      path = $2
+      if (path ~ /^\.\/dists\//) {
+        next
+      }
+      if (path ~ /^\.\/pool\//) {
+        next
+      }
+      if (path ~ /^\.\/casper\/minimal\.standard/ &&
+          path !~ /^\.\/casper\/minimal\.standard\.live/) {
+        next
+      }
+      if (path ~ /^\.\/casper\/minimal\./ &&
+          path !~ /^\.\/casper\/minimal\.(squashfs|size|manifest|manifest\.full)$/ &&
+          path !~ /^\.\/casper\/minimal\.standard\.live\./) {
+        next
+      }
+      print
+    }
+  ' "${MD5_FILE}" > "${TMP_FILE}"
+  mv "${TMP_FILE}" "${MD5_FILE}"
+}
+
+function prune_slim_online_manifest() {
+  local MANIFEST="${1}"
+  local TMP_FILE="${MANIFEST}.tmp"
+
+  [ -f "${MANIFEST}" ] || return 0
+  awk '
+    {
+      name = $1
+      sub(/^[+-]/, "", name)
+
+      if (name ~ /^snap:/) {
+        snap = name
+        sub(/^snap:/, "", snap)
+        if (snap == "firefox" || snap == "thunderbird") {
+          next
+        }
+      }
+
+      pkg = name
+      sub(/:.*/, "", pkg)
+      if (pkg == "firefox" ||
+          pkg == "thunderbird" || pkg ~ /^thunderbird-/ ||
+          pkg == "transmission" || pkg ~ /^transmission-/ ||
+          pkg == "libreoffice" || pkg ~ /^libreoffice-/ ||
+          pkg == "remmina" || pkg ~ /^remmina-/ ||
+          pkg == "rhythmbox" || pkg ~ /^rhythmbox-/ ||
+          pkg == "shotwell" || pkg ~ /^shotwell-/ ||
+          pkg == "nvidia-prime" || pkg == "nvidia-settings" ||
+          pkg == "libnvidia-egl-wayland1" || pkg == "libxnvctrl0" ||
+          pkg == "linux-firmware-nvidia-graphics") {
+        next
+      }
+
+      print
+    }
+  ' "${MANIFEST}" > "${TMP_FILE}"
+  mv "${TMP_FILE}" "${MANIFEST}"
+}
+
+function keep_minimal_install_source() {
+  local INSTALL_SOURCES="${1}"
+  local TMP_FILE="${INSTALL_SOURCES}.tmp"
+
+  [ -f "${INSTALL_SOURCES}" ] || return 0
+  awk '
+    /^- default: false$/ {
+      skip = 1
+      next
+    }
+    skip && /^version:/ {
+      skip = 0
+    }
+    skip {
+      next
+    }
+    /^  preinstalled_langs:/ {
+      skip_langs = 1
+      next
+    }
+    skip_langs {
+      if ($0 ~ /^  [^[:space:]-]/ || $0 ~ /^version:/) {
+        skip_langs = 0
+      } else {
+        next
+      }
+    }
+    /^    minimal-enhanced-secureboot:/ {
+      skip_secureboot = 1
+      next
+    }
+    skip_secureboot {
+      if ($0 ~ /^    [^[:space:]]/ || $0 ~ /^version:/) {
+        skip_secureboot = 0
+      } else {
+        next
+      }
+    }
+    { print }
+  ' "${INSTALL_SOURCES}" > "${TMP_FILE}"
+  mv "${TMP_FILE}" "${INSTALL_SOURCES}"
+}
+
+function remove_snap_from_seed_yaml() {
+  local SEED_YAML="${1}"
+  local SNAP_NAME="${2}"
+  local TMP_FILE="${SEED_YAML}.tmp"
+
+  [ -f "${SEED_YAML}" ] || return 0
+  awk -v snap="${SNAP_NAME}" '
+    /^  -$/ {
+      if (in_block && !skip_block) {
+        printf "%s", block
+      }
+      block = $0 ORS
+      in_block = 1
+      skip_block = 0
+      next
+    }
+    {
+      if (in_block) {
+        block = block $0 ORS
+        if ($0 ~ "^[[:space:]]+name:[[:space:]]*" snap "$") {
+          skip_block = 1
+        }
+        next
+      }
+      print
+    }
+    END {
+      if (in_block && !skip_block) {
+        printf "%s", block
+      }
+    }
+  ' "${SEED_YAML}" > "${TMP_FILE}"
+  mv "${TMP_FILE}" "${SEED_YAML}"
+}
+
+function remove_snap_from_state() {
+  local ROOT="${1}"
+  local SNAP_NAME="${2}"
+  local STATE_JSON="${ROOT}/var/lib/snapd/state.json"
+  local TMP_FILE="${STATE_JSON}.tmp"
+
+  [ -f "${STATE_JSON}" ] || return 0
+  jq --arg snap "${SNAP_NAME}" '
+    del(.data.snaps[$snap])
+    | .data.conns |= with_entries(
+        select(((.key | startswith($snap + ":")) or (.key | contains(" " + $snap + ":"))) | not)
+      )
+    | .data["snap-cookies"] |= with_entries(select(.value != $snap))
+  ' "${STATE_JSON}" > "${TMP_FILE}"
+  mv "${TMP_FILE}" "${STATE_JSON}"
+}
+
+function remove_seeded_snap() {
+  local ROOT="${1}"
+  local SNAP_NAME="${2}"
+
+  echo " - Removing seeded snap ${SNAP_NAME}"
+  rm -rf "${ROOT}/snap/${SNAP_NAME}"
+  rm -f "${ROOT}/snap/bin/${SNAP_NAME}" "${ROOT}/snap/bin/${SNAP_NAME}."*
+  if [ "${SNAP_NAME}" = "firefox" ]; then
+    rm -f "${ROOT}/snap/bin/geckodriver"
+  fi
+
+  rm -f "${ROOT}/var/lib/snapd/seed/snaps/${SNAP_NAME}_"*.snap
+  rm -f "${ROOT}/var/lib/snapd/snaps/${SNAP_NAME}_"*.snap
+  rm -f "${ROOT}/var/lib/snapd/seed/assertions/${SNAP_NAME}_"*.assert
+  rm -f "${ROOT}/var/lib/snapd/apparmor/profiles/snap.${SNAP_NAME}"*
+  rm -f "${ROOT}/var/lib/snapd/apparmor/profiles/snap-update-ns.${SNAP_NAME}"
+  rm -f "${ROOT}/var/lib/snapd/cgroup/snap.${SNAP_NAME}."*
+  rm -f "${ROOT}/var/lib/snapd/cookie/snap.${SNAP_NAME}"
+  rm -f "${ROOT}/var/lib/snapd/desktop/applications/${SNAP_NAME}_"*.desktop
+  rm -f "${ROOT}/var/lib/snapd/inhibit/${SNAP_NAME}.lock"
+  rm -f "${ROOT}/var/lib/snapd/mount/snap.${SNAP_NAME}."*
+  rm -f "${ROOT}/var/lib/snapd/seccomp/bpf/snap.${SNAP_NAME}."*
+  rm -f "${ROOT}/var/lib/snapd/sequence/${SNAP_NAME}.json"
+
+  remove_snap_from_seed_yaml "${ROOT}/var/lib/snapd/seed/seed.yaml" "${SNAP_NAME}"
+  remove_snap_from_state "${ROOT}" "${SNAP_NAME}"
+}
+
+function install_epiphany_online_hook() {
+  local ROOT="${1}"
+  local SCRIPT="${ROOT}/usr/local/sbin/umpc-install-epiphany-browser"
+  local SERVICE="${ROOT}/etc/systemd/system/umpc-install-epiphany-browser.service"
+  local WANTS="${ROOT}/etc/systemd/system/multi-user.target.wants"
+
+  echo " - Adding online Epiphany install hook"
+  mkdir -p "$(dirname "${SCRIPT}")" "$(dirname "${SERVICE}")" "${WANTS}"
+  cat > "${SCRIPT}" <<'EOF'
+#!/bin/sh
+set -eu
+
+MARKER=/var/lib/umpc-online-slim/epiphany-browser-installed
+[ -e "${MARKER}" ] && exit 0
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get -o DPkg::Lock::Timeout=300 purge -y firefox || true
+apt-get -o DPkg::Lock::Timeout=300 update
+apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends epiphany-browser
+
+mkdir -p "$(dirname "${MARKER}")"
+touch "${MARKER}"
+EOF
+  chmod 755 "${SCRIPT}"
+
+  cat > "${SERVICE}" <<'EOF'
+[Unit]
+Description=Install Epiphany browser for the UMPC online-slim image
+Wants=network-online.target
+After=network-online.target apt-daily.service apt-daily-upgrade.service snapd.seeded.service
+ConditionPathExists=!/var/lib/umpc-online-slim/epiphany-browser-installed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/umpc-install-epiphany-browser
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  ln -sf ../umpc-install-epiphany-browser.service "${WANTS}/umpc-install-epiphany-browser.service"
+}
+
+function apply_slim_online_rootfs() {
+  local ROOT="${1}"
+
+  echo "Applying online-slim root filesystem changes"
+  remove_seeded_snap "${ROOT}" firefox
+  remove_seeded_snap "${ROOT}" thunderbird
+  rm -rf "${ROOT}/usr/lib/firmware/nvidia"
+  install_epiphany_online_hook "${ROOT}"
+}
+
+function apply_slim_online_live_rootfs() {
+  local ROOT="${1}"
+
+  echo "Applying online-slim live layer changes"
+  remove_seeded_snap "${ROOT}" firefox
+  remove_seeded_snap "${ROOT}" thunderbird
+  rm -f "${ROOT}/var/lib/snapd/seed/snaps/"*nvidia*.comp
+}
+
+function iso_path_exists() {
+  local ISO_PATH="${1}"
+  local ISO_FILE="${2}"
+
+  isoinfo -R -i "${ISO_PATH}" -f | grep -Fx "${ISO_FILE}" >/dev/null
+}
+
+function extract_optional_from_iso() {
+  local ISO_PATH="${1}"
+  local ISO_FILE="${2}"
+  local OUT_FILE="${3}"
+
+  if iso_path_exists "${ISO_PATH}" "${ISO_FILE}"; then
+    extract_from_iso "${ISO_PATH}" "${ISO_FILE}" "${OUT_FILE}"
+    return 0
+  fi
+  return 1
+}
+
+function find_live_squashfs_image() {
+  local ISO_PATH="${1}"
+
+  isoinfo -R -i "${ISO_PATH}" -f |
+    awk '
+      /^\/casper\/.*\.live\.squashfs$/ {
+        sub(/^\//, "", $0)
+        print
+        exit
+      }'
+}
+
+function collect_slim_iso_remove_paths() {
+  local ISO_PATH="${1}"
+
+  isoinfo -R -i "${ISO_PATH}" -f |
+    awk '
+      /^\/casper\/minimal\./ &&
+      $0 !~ /^\/casper\/minimal\.(squashfs|size|manifest|manifest\.full)$/ &&
+      $0 !~ /^\/casper\/minimal\.standard\.live\./ {
+        print
+      }'
 }
 
 function add_live_boot_args() {
@@ -261,15 +558,33 @@ function clean_up() {
 
 ORIGINAL_ARGS=("$@")
 UMPC=""
-OPTSTRING=d:h
-while getopts ${OPTSTRING} OPT; do
-  case ${OPT} in
-    d) UMPC="${OPTARG}";;
-    h) usage;;
-    *) usage;;
+SLIM_ONLINE=0
+while [ "${#}" -gt 0 ]; do
+  case "${1}" in
+    -d)
+      [ "${#}" -ge 2 ] || usage
+      UMPC="${2}"
+      shift 2
+      ;;
+    --slim-online)
+      SLIM_ONLINE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      usage
+      ;;
+    *)
+      break
+      ;;
   esac
 done
-shift "$((OPTIND - 1))"
 
 enter_fakeroot "${ORIGINAL_ARGS[@]}"
 
@@ -283,6 +598,9 @@ ISO_IN="${1:-}"
 for CMD in awk chmod cp cpio du find grep isoinfo md5sum mksquashfs mv rm sed sort unmkinitramfs unsquashfs xorriso zstd; do
   require_command "${CMD}"
 done
+if [ "${SLIM_ONLINE}" -eq 1 ]; then
+  require_command jq
+fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
@@ -308,6 +626,16 @@ SQUASH_IN="${WORKDIR}/$(basename "${SQUASH_REL}")"
 SQUASH_OUT="${WORKDIR}/squashfs-root"
 SQUASH_NEW="${WORKDIR}/$(basename "${SQUASH_REL%.squashfs}")-new.squashfs"
 SQUASH_SIZE="${WORKDIR}/$(basename "${SQUASH_SIZE_REL}")"
+INSTALL_SOURCES_REL="casper/install-sources.yaml"
+INSTALL_SOURCES="${WORKDIR}/install-sources.yaml"
+LIVE_SQUASH_REL=""
+LIVE_SQUASH_IN=""
+LIVE_SQUASH_OUT=""
+LIVE_SQUASH_NEW=""
+LIVE_SQUASH_SIZE_REL=""
+LIVE_SQUASH_SIZE=""
+MANIFEST_RELS=()
+MANIFEST_FILES=()
 
 extract_from_iso "${ISO_IN}" "/.disk/info" "${INFO_FILE}"
 extract_from_iso "${ISO_IN}" "/md5sum.txt" "${MD5_FILE}"
@@ -315,6 +643,32 @@ extract_from_iso "${ISO_IN}" "/boot/grub/grub.cfg" "${GRUB_BOOT_CONF}"
 extract_from_iso "${ISO_IN}" "/boot/grub/loopback.cfg" "${GRUB_LOOPBACK_CONF}"
 extract_from_iso "${ISO_IN}" "/${INITRD_REL}" "${INITRD_IN}"
 extract_from_iso "${ISO_IN}" "/${SQUASH_REL}" "${SQUASH_IN}"
+if [ "${SLIM_ONLINE}" -eq 1 ]; then
+  extract_from_iso "${ISO_IN}" "/${INSTALL_SOURCES_REL}" "${INSTALL_SOURCES}"
+  for MANIFEST_REL in "${SQUASH_REL%.squashfs}.manifest" "${SQUASH_REL%.squashfs}.manifest.full"; do
+    MANIFEST_FILE="${WORKDIR}/$(basename "${MANIFEST_REL}")"
+    if extract_optional_from_iso "${ISO_IN}" "/${MANIFEST_REL}" "${MANIFEST_FILE}"; then
+      MANIFEST_RELS+=("${MANIFEST_REL}")
+      MANIFEST_FILES+=("${MANIFEST_FILE}")
+    fi
+  done
+  LIVE_SQUASH_REL=$(find_live_squashfs_image "${ISO_IN}")
+  if [ -n "${LIVE_SQUASH_REL}" ]; then
+    LIVE_SQUASH_SIZE_REL="${LIVE_SQUASH_REL%.squashfs}.size"
+    LIVE_SQUASH_IN="${WORKDIR}/$(basename "${LIVE_SQUASH_REL}")"
+    LIVE_SQUASH_OUT="${WORKDIR}/live-squashfs-root"
+    LIVE_SQUASH_NEW="${WORKDIR}/$(basename "${LIVE_SQUASH_REL%.squashfs}")-new.squashfs"
+    LIVE_SQUASH_SIZE="${WORKDIR}/$(basename "${LIVE_SQUASH_SIZE_REL}")"
+    extract_from_iso "${ISO_IN}" "/${LIVE_SQUASH_REL}" "${LIVE_SQUASH_IN}"
+    for MANIFEST_REL in "${LIVE_SQUASH_REL%.squashfs}.manifest" "${LIVE_SQUASH_REL%.squashfs}.manifest.full"; do
+      MANIFEST_FILE="${WORKDIR}/$(basename "${MANIFEST_REL}")"
+      if extract_optional_from_iso "${ISO_IN}" "/${MANIFEST_REL}" "${MANIFEST_FILE}"; then
+        MANIFEST_RELS+=("${MANIFEST_REL}")
+        MANIFEST_FILES+=("${MANIFEST_FILE}")
+      fi
+    done
+  fi
+fi
 
 FLAVOUR=$(cut -d' ' -f1 < "${INFO_FILE}")
 VERSION=$(cut -d' ' -f2 < "${INFO_FILE}")
@@ -335,6 +689,9 @@ echo "Using ${SQUASH_REL} as the root filesystem image"
 echo "Preserving ${SQUASH_COMP:-default} squashfs compression"
 
 unsquashfs -no-exit-code -f -d "${SQUASH_OUT}" "${SQUASH_IN}"
+if [ "${SLIM_ONLINE}" -eq 1 ]; then
+  apply_slim_online_rootfs "${SQUASH_OUT}"
+fi
 
 XORG_CONF_PATH="${SQUASH_OUT}/usr/share/X11/xorg.conf.d"
 MODPROBE_CONF="${SQUASH_OUT}/etc/modprobe.d/alsa-${UMPC}.conf"
@@ -378,25 +735,92 @@ case "${SQUASH_COMP}" in
 esac
 mksquashfs "${MKSQUASHFS_ARGS[@]}"
 
+if [ "${SLIM_ONLINE}" -eq 1 ] && [ -n "${LIVE_SQUASH_REL}" ]; then
+  LIVE_SQUASH_COMP=$(unsquashfs -s "${LIVE_SQUASH_IN}" | awk '
+    /^Compression/ {
+      if ($0 ~ /:/) {
+        sub(/^[^:]*:[ \t]*/, "", $0)
+        print tolower($0)
+      } else {
+        print tolower($2)
+      }
+      exit
+    }')
+  unsquashfs -no-exit-code -f -d "${LIVE_SQUASH_OUT}" "${LIVE_SQUASH_IN}"
+  apply_slim_online_live_rootfs "${LIVE_SQUASH_OUT}"
+  du -sx --block-size=1 "${LIVE_SQUASH_OUT}" | cut -f1 > "${LIVE_SQUASH_SIZE}"
+
+  LIVE_MKSQUASHFS_ARGS=("${LIVE_SQUASH_OUT}" "${LIVE_SQUASH_NEW}" -noappend -processors "${MKSQUASHFS_PROCESSORS:-2}")
+  case "${LIVE_SQUASH_COMP}" in
+    gzip|lzma|lzo|lz4|xz|zstd)
+      LIVE_MKSQUASHFS_ARGS+=(-comp "${LIVE_SQUASH_COMP}")
+      ;;
+  esac
+  mksquashfs "${LIVE_MKSQUASHFS_ARGS[@]}"
+fi
+
+if [ "${SLIM_ONLINE}" -eq 1 ]; then
+  keep_minimal_install_source "${INSTALL_SOURCES}"
+  for MANIFEST_FILE in "${MANIFEST_FILES[@]}"; do
+    prune_slim_online_manifest "${MANIFEST_FILE}"
+  done
+  filter_md5sum_for_slim_online "${MD5_FILE}"
+fi
+
 update_md5sum "${MD5_FILE}" "boot/grub/grub.cfg" "${GRUB_BOOT_CONF}"
 update_md5sum "${MD5_FILE}" "boot/grub/loopback.cfg" "${GRUB_LOOPBACK_CONF}"
 update_md5sum "${MD5_FILE}" "${INITRD_REL}" "${INITRD_NEW}"
 update_md5sum "${MD5_FILE}" "${SQUASH_SIZE_REL}" "${SQUASH_SIZE}"
 update_md5sum "${MD5_FILE}" "${SQUASH_REL}" "${SQUASH_NEW}"
+if [ "${SLIM_ONLINE}" -eq 1 ]; then
+  update_md5sum "${MD5_FILE}" "${INSTALL_SOURCES_REL}" "${INSTALL_SOURCES}"
+  for MANIFEST_INDEX in "${!MANIFEST_FILES[@]}"; do
+    update_md5sum "${MD5_FILE}" "${MANIFEST_RELS[${MANIFEST_INDEX}]}" "${MANIFEST_FILES[${MANIFEST_INDEX}]}"
+  done
+  if [ -n "${LIVE_SQUASH_REL}" ]; then
+    update_md5sum "${MD5_FILE}" "${LIVE_SQUASH_SIZE_REL}" "${LIVE_SQUASH_SIZE}"
+    update_md5sum "${MD5_FILE}" "${LIVE_SQUASH_REL}" "${LIVE_SQUASH_NEW}"
+  fi
+fi
 
 rm -f "${ISO_OUT}"
 VOL_ID=$(echo "${FLAVOUR}-${VERSION}-${UMPC}" | cut -c1-31)
+SLIM_XORRISO_ARGS=()
+SLIM_MAP_ARGS=()
+if [ "${SLIM_ONLINE}" -eq 1 ]; then
+  for SLIM_REMOVE_TREE in \
+    /dists \
+    /pool; do
+    if iso_path_exists "${ISO_IN}" "${SLIM_REMOVE_TREE}"; then
+      SLIM_XORRISO_ARGS+=(-rm_r "${SLIM_REMOVE_TREE}" --)
+    fi
+  done
+  mapfile -t SLIM_REMOVE_PATHS < <(collect_slim_iso_remove_paths "${ISO_IN}")
+  if [ "${#SLIM_REMOVE_PATHS[@]}" -gt 0 ]; then
+    SLIM_XORRISO_ARGS+=(-rm "${SLIM_REMOVE_PATHS[@]}" --)
+  fi
+  SLIM_MAP_ARGS+=(-map "${INSTALL_SOURCES}" "/${INSTALL_SOURCES_REL}")
+  for MANIFEST_INDEX in "${!MANIFEST_FILES[@]}"; do
+    SLIM_MAP_ARGS+=(-map "${MANIFEST_FILES[${MANIFEST_INDEX}]}" "/${MANIFEST_RELS[${MANIFEST_INDEX}]}")
+  done
+  if [ -n "${LIVE_SQUASH_REL}" ]; then
+    SLIM_MAP_ARGS+=(-map "${LIVE_SQUASH_SIZE}" "/${LIVE_SQUASH_SIZE_REL}")
+    SLIM_MAP_ARGS+=(-map "${LIVE_SQUASH_NEW}" "/${LIVE_SQUASH_REL}")
+  fi
+fi
 xorriso \
   -indev "${ISO_IN}" \
   -outdev "${ISO_OUT}" \
   -boot_image any replay \
   -volid "${VOL_ID}" \
   -overwrite on \
+  "${SLIM_XORRISO_ARGS[@]}" \
   -map "${GRUB_BOOT_CONF}" /boot/grub/grub.cfg \
   -map "${GRUB_LOOPBACK_CONF}" /boot/grub/loopback.cfg \
   -map "${INITRD_NEW}" "/${INITRD_REL}" \
   -map "${SQUASH_SIZE}" "/${SQUASH_SIZE_REL}" \
   -map "${SQUASH_NEW}" "/${SQUASH_REL}" \
+  "${SLIM_MAP_ARGS[@]}" \
   -map "${MD5_FILE}" /md5sum.txt \
   -commit
 

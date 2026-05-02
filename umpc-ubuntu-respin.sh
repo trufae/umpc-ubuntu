@@ -12,6 +12,9 @@ function usage() {
     echo "    -d"
     echo "        device modifications to apply to the iso image, can be 'gpd-pocket', 'gpd-pocket2', 'gpd-pocket3', 'gpd-micropc', 'gpd-p2-max', 'gpd-win2', 'gpd-win3', 'gpd-win-max' or 'topjoy-falcon'"
     echo
+    echo "    --slim-online"
+    echo "        remove offline/full-install payloads and install Epiphany online after setup."
+    echo
     echo "    -h"
     echo "        display this help and exit"
     echo
@@ -246,6 +249,281 @@ function inject_data() {
   fi
 }
 
+function keep_minimal_install_source() {
+  local INSTALL_SOURCES="${1}"
+  local TMP_FILE="${INSTALL_SOURCES}.tmp"
+
+  [ -f "${INSTALL_SOURCES}" ] || return 0
+  awk '
+    /^- default: false$/ {
+      skip = 1
+      next
+    }
+    skip && /^version:/ {
+      skip = 0
+    }
+    skip {
+      next
+    }
+    /^  preinstalled_langs:/ {
+      skip_langs = 1
+      next
+    }
+    skip_langs {
+      if ($0 ~ /^  [^[:space:]-]/ || $0 ~ /^version:/) {
+        skip_langs = 0
+      } else {
+        next
+      }
+    }
+    /^    minimal-enhanced-secureboot:/ {
+      skip_secureboot = 1
+      next
+    }
+    skip_secureboot {
+      if ($0 ~ /^    [^[:space:]]/ || $0 ~ /^version:/) {
+        skip_secureboot = 0
+      } else {
+        next
+      }
+    }
+    { print }
+  ' "${INSTALL_SOURCES}" > "${TMP_FILE}"
+  mv "${TMP_FILE}" "${INSTALL_SOURCES}"
+}
+
+function prune_slim_online_manifest() {
+  local MANIFEST="${1}"
+  local TMP_FILE="${MANIFEST}.tmp"
+
+  [ -f "${MANIFEST}" ] || return 0
+  awk '
+    {
+      name = $1
+      sub(/^[+-]/, "", name)
+
+      if (name ~ /^snap:/) {
+        snap = name
+        sub(/^snap:/, "", snap)
+        if (snap == "firefox" || snap == "thunderbird") {
+          next
+        }
+      }
+
+      pkg = name
+      sub(/:.*/, "", pkg)
+      if (pkg == "firefox" ||
+          pkg == "thunderbird" || pkg ~ /^thunderbird-/ ||
+          pkg == "transmission" || pkg ~ /^transmission-/ ||
+          pkg == "libreoffice" || pkg ~ /^libreoffice-/ ||
+          pkg == "remmina" || pkg ~ /^remmina-/ ||
+          pkg == "rhythmbox" || pkg ~ /^rhythmbox-/ ||
+          pkg == "shotwell" || pkg ~ /^shotwell-/ ||
+          pkg == "nvidia-prime" || pkg == "nvidia-settings" ||
+          pkg == "libnvidia-egl-wayland1" || pkg == "libxnvctrl0" ||
+          pkg == "linux-firmware-nvidia-graphics") {
+        next
+      }
+
+      print
+    }
+  ' "${MANIFEST}" > "${TMP_FILE}"
+  mv "${TMP_FILE}" "${MANIFEST}"
+}
+
+function remove_snap_from_seed_yaml() {
+  local SEED_YAML="${1}"
+  local SNAP_NAME="${2}"
+  local TMP_FILE="${SEED_YAML}.tmp"
+
+  [ -f "${SEED_YAML}" ] || return 0
+  awk -v snap="${SNAP_NAME}" '
+    /^  -$/ {
+      if (in_block && !skip_block) {
+        printf "%s", block
+      }
+      block = $0 ORS
+      in_block = 1
+      skip_block = 0
+      next
+    }
+    {
+      if (in_block) {
+        block = block $0 ORS
+        if ($0 ~ "^[[:space:]]+name:[[:space:]]*" snap "$") {
+          skip_block = 1
+        }
+        next
+      }
+      print
+    }
+    END {
+      if (in_block && !skip_block) {
+        printf "%s", block
+      }
+    }
+  ' "${SEED_YAML}" > "${TMP_FILE}"
+  mv "${TMP_FILE}" "${SEED_YAML}"
+}
+
+function remove_snap_from_state() {
+  local ROOT="${1}"
+  local SNAP_NAME="${2}"
+  local STATE_JSON="${ROOT}/var/lib/snapd/state.json"
+  local TMP_FILE="${STATE_JSON}.tmp"
+
+  [ -f "${STATE_JSON}" ] || return 0
+  jq --arg snap "${SNAP_NAME}" '
+    del(.data.snaps[$snap])
+    | .data.conns |= with_entries(
+        select(((.key | startswith($snap + ":")) or (.key | contains(" " + $snap + ":"))) | not)
+      )
+    | .data["snap-cookies"] |= with_entries(select(.value != $snap))
+  ' "${STATE_JSON}" > "${TMP_FILE}"
+  mv "${TMP_FILE}" "${STATE_JSON}"
+}
+
+function remove_seeded_snap() {
+  local ROOT="${1}"
+  local SNAP_NAME="${2}"
+
+  echo " - Removing seeded snap ${SNAP_NAME}"
+  rm -rf "${ROOT}/snap/${SNAP_NAME}"
+  rm -f "${ROOT}/snap/bin/${SNAP_NAME}" "${ROOT}/snap/bin/${SNAP_NAME}."*
+  if [ "${SNAP_NAME}" = "firefox" ]; then
+    rm -f "${ROOT}/snap/bin/geckodriver"
+  fi
+
+  rm -f "${ROOT}/var/lib/snapd/seed/snaps/${SNAP_NAME}_"*.snap
+  rm -f "${ROOT}/var/lib/snapd/snaps/${SNAP_NAME}_"*.snap
+  rm -f "${ROOT}/var/lib/snapd/seed/assertions/${SNAP_NAME}_"*.assert
+  rm -f "${ROOT}/var/lib/snapd/apparmor/profiles/snap.${SNAP_NAME}"*
+  rm -f "${ROOT}/var/lib/snapd/apparmor/profiles/snap-update-ns.${SNAP_NAME}"
+  rm -f "${ROOT}/var/lib/snapd/cgroup/snap.${SNAP_NAME}."*
+  rm -f "${ROOT}/var/lib/snapd/cookie/snap.${SNAP_NAME}"
+  rm -f "${ROOT}/var/lib/snapd/desktop/applications/${SNAP_NAME}_"*.desktop
+  rm -f "${ROOT}/var/lib/snapd/inhibit/${SNAP_NAME}.lock"
+  rm -f "${ROOT}/var/lib/snapd/mount/snap.${SNAP_NAME}."*
+  rm -f "${ROOT}/var/lib/snapd/seccomp/bpf/snap.${SNAP_NAME}."*
+  rm -f "${ROOT}/var/lib/snapd/sequence/${SNAP_NAME}.json"
+
+  remove_snap_from_seed_yaml "${ROOT}/var/lib/snapd/seed/seed.yaml" "${SNAP_NAME}"
+  remove_snap_from_state "${ROOT}" "${SNAP_NAME}"
+}
+
+function install_epiphany_online_hook() {
+  local ROOT="${1}"
+  local SCRIPT="${ROOT}/usr/local/sbin/umpc-install-epiphany-browser"
+  local SERVICE="${ROOT}/etc/systemd/system/umpc-install-epiphany-browser.service"
+  local WANTS="${ROOT}/etc/systemd/system/multi-user.target.wants"
+
+  echo " - Adding online Epiphany install hook"
+  mkdir -p "$(dirname "${SCRIPT}")" "$(dirname "${SERVICE}")" "${WANTS}"
+  cat > "${SCRIPT}" <<'EOF'
+#!/bin/sh
+set -eu
+
+MARKER=/var/lib/umpc-online-slim/epiphany-browser-installed
+[ -e "${MARKER}" ] && exit 0
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get -o DPkg::Lock::Timeout=300 purge -y firefox || true
+apt-get -o DPkg::Lock::Timeout=300 update
+apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends epiphany-browser
+
+mkdir -p "$(dirname "${MARKER}")"
+touch "${MARKER}"
+EOF
+  chmod 755 "${SCRIPT}"
+
+  cat > "${SERVICE}" <<'EOF'
+[Unit]
+Description=Install Epiphany browser for the UMPC online-slim image
+Wants=network-online.target
+After=network-online.target apt-daily.service apt-daily-upgrade.service snapd.seeded.service
+ConditionPathExists=!/var/lib/umpc-online-slim/epiphany-browser-installed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/umpc-install-epiphany-browser
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  ln -sf ../umpc-install-epiphany-browser.service "${WANTS}/umpc-install-epiphany-browser.service"
+}
+
+function apply_slim_online_rootfs() {
+  local ROOT="${1}"
+
+  echo "Applying online-slim root filesystem changes"
+  remove_seeded_snap "${ROOT}" firefox
+  remove_seeded_snap "${ROOT}" thunderbird
+  rm -rf "${ROOT}/usr/lib/firmware/nvidia"
+  install_epiphany_online_hook "${ROOT}"
+}
+
+function apply_slim_online_live_rootfs() {
+  local ROOT="${1}"
+
+  echo "Applying online-slim live layer changes"
+  remove_seeded_snap "${ROOT}" firefox
+  remove_seeded_snap "${ROOT}" thunderbird
+  rm -f "${ROOT}/var/lib/snapd/seed/snaps/"*nvidia*.comp
+}
+
+function apply_slim_online_iso_tree() {
+  local ISO_ROOT="${1}"
+  local MANIFEST
+
+  echo "Removing offline/full-install payloads for online-slim image"
+  rm -rf "${ISO_ROOT}/dists"
+  rm -rf "${ISO_ROOT}/pool"
+  find "${ISO_ROOT}/casper" -maxdepth 1 -type f -name 'minimal.*' \
+    ! -name 'minimal.squashfs' \
+    ! -name 'minimal.size' \
+    ! -name 'minimal.manifest' \
+    ! -name 'minimal.manifest.full' \
+    ! -name 'minimal.standard.live.*' \
+    -delete
+  keep_minimal_install_source "${ISO_ROOT}/casper/install-sources.yaml"
+  while IFS= read -r -d '' MANIFEST; do
+    prune_slim_online_manifest "${MANIFEST}"
+  done < <(find "${ISO_ROOT}/casper" -maxdepth 1 -type f \( -name '*.manifest' -o -name '*.manifest.full' \) -print0)
+}
+
+function patch_slim_online_live_layer() {
+  local ISO_ROOT="${1}"
+  local LIVE_SQUASH
+  local LIVE_ROOT
+  local LIVE_NEW
+  local LIVE_SIZE
+  local LIVE_COMP
+
+  LIVE_SQUASH=$(find "${ISO_ROOT}/casper" -maxdepth 1 -type f -name '*.live.squashfs' | sort | head -n 1)
+  [ -n "${LIVE_SQUASH}" ] || return 0
+
+  LIVE_ROOT="${WORKDIR}/live-squashfs-root"
+  LIVE_NEW="${WORKDIR}/$(basename "${LIVE_SQUASH%.squashfs}")-new.squashfs"
+  LIVE_SIZE="${LIVE_SQUASH%.squashfs}.size"
+  LIVE_COMP=$(unsquashfs -s "${LIVE_SQUASH}" | awk -F: '/Compression/ {gsub(/^[ \t]+/, "", $2); print tolower($2); exit}')
+
+  unsquashfs -f -d "${LIVE_ROOT}" "${LIVE_SQUASH}"
+  apply_slim_online_live_rootfs "${LIVE_ROOT}"
+  du -sx --block-size=1 "${LIVE_ROOT}" | cut -f1 > "${LIVE_SIZE}"
+  rm -f "${LIVE_SQUASH}" "${LIVE_NEW}"
+  case "${LIVE_COMP}" in
+    gzip|lzma|lzo|lz4|xz|zstd)
+      mksquashfs "${LIVE_ROOT}" "${LIVE_NEW}" -comp "${LIVE_COMP}"
+      ;;
+    *)
+      mksquashfs "${LIVE_ROOT}" "${LIVE_NEW}"
+      ;;
+  esac
+  mv "${LIVE_NEW}" "${LIVE_SQUASH}"
+  rm -rf "${LIVE_ROOT}"
+}
+
 CLEANED_UP=0
 function clean_up() {
   if [ "${CLEANED_UP}" -eq 1 ]; then
@@ -281,16 +559,37 @@ require_command zstd zstd
 
 
 UMPC=""
-OPTSTRING=d:h
-while getopts ${OPTSTRING} OPT; do
-    case ${OPT} in
-        d) UMPC="${OPTARG}";;
-        h) usage;;
-        *) usage;;
+SLIM_ONLINE=0
+while [ "${#}" -gt 0 ]; do
+    case "${1}" in
+        -d)
+            [ "${#}" -ge 2 ] || usage
+            UMPC="${2}"
+            shift 2
+            ;;
+        --slim-online)
+            SLIM_ONLINE=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            usage
+            ;;
+        *)
+            break
+            ;;
     esac
 done
-shift "$((OPTIND - 1))"
 ISO_IN="${1}"
+if [ "${SLIM_ONLINE}" -eq 1 ]; then
+  require_command jq jq
+fi
 
 if [ -z "${UMPC}" ]; then
   echo "ERROR! You must supply the name of the device you want to apply modifications for."
@@ -375,8 +674,15 @@ if [ -f "${MNT_IN}/.disk/info" ] && [ -f "${SQUASH_IN}" ]; then
     --exclude=/md5sum.txt \
     "${MNT_IN}/" "${MNT_OUT}/" >/dev/null
 
+  if [ "${SLIM_ONLINE}" -eq 1 ]; then
+    apply_slim_online_iso_tree "${MNT_OUT}"
+  fi
+
   # Extract the contents of the squashfs
   unsquashfs -f -d "${SQUASH_OUT}" "${SQUASH_IN}"
+  if [ "${SLIM_ONLINE}" -eq 1 ]; then
+    apply_slim_online_rootfs "${SQUASH_OUT}"
+  fi
   umount -l "${MNT_IN}"
 else
   echo "ERROR! This doesn't look like an Ubuntu iso image."
@@ -604,6 +910,9 @@ esac
 echo "Cleaning up..."
 echo "  - ${SQUASH_OUT}"
 rm -rf "${SQUASH_OUT}"
+if [ "${SLIM_ONLINE}" -eq 1 ]; then
+  patch_slim_online_live_layer "${MNT_OUT}"
+fi
 sync
 
 # Collect md5sums
