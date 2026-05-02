@@ -168,6 +168,114 @@ log_begin_msg "$DESCRIPTION"
 log_end_msg
 EOF
   chmod 755 "${CASPER_BOTTOM}/41apt_build_cache_cdrom"
+
+  cat > "${CASPER_BOTTOM}/54umpc_no_preinstaller_work" <<'EOF'
+#! /bin/sh
+
+PREREQ=""
+DESCRIPTION="Disabling package downloads before the installer UI..."
+
+prereqs()
+{
+       echo "$PREREQ"
+}
+
+case $1 in
+prereqs)
+       prereqs
+       exit 0
+       ;;
+esac
+
+. /scripts/casper-functions
+
+mask_unit()
+{
+       unit="$1"
+       mkdir -p /root/etc/systemd/system
+       rm -f \
+          "/root/etc/systemd/system/basic.target.wants/$unit" \
+          "/root/etc/systemd/system/multi-user.target.wants/$unit" \
+          "/root/etc/systemd/system/network-online.target.wants/$unit" \
+          "/root/etc/systemd/system/sockets.target.wants/$unit" \
+          "/root/etc/systemd/system/timers.target.wants/$unit"
+       ln -sf /dev/null "/root/etc/systemd/system/$unit"
+}
+
+log_begin_msg "$DESCRIPTION"
+
+rm -f /root/etc/systemd/system/display-manager.service.d/wait-for-snapd-seeding.conf
+rmdir /root/etc/systemd/system/display-manager.service.d 2>/dev/null || true
+rm -f /root/etc/systemd/user/graphical-session.target.wants/ubuntu-desktop-installer.service
+
+for unit in \
+    apt-daily.service \
+    apt-daily.timer \
+    apt-daily-upgrade.service \
+    apt-daily-upgrade.timer \
+    fwupd-refresh.service \
+    fwupd-refresh.timer \
+    motd-news.service \
+    motd-news.timer \
+    NetworkManager-wait-online.service \
+    packagekit.service \
+    packagekit-offline-update.service \
+    unattended-upgrades.service \
+    update-notifier-download.service \
+    update-notifier-download.timer \
+    update-notifier-motd.service \
+    update-notifier-motd.timer \
+    umpc-install-epiphany-browser.service; do
+       mask_unit "$unit"
+done
+
+rm -rf /root/var/lib/update-notifier/package-data-downloads/partial
+rm -f /root/var/lib/update-notifier/dpkg-run-stamp
+
+log_end_msg
+EOF
+  chmod 755 "${CASPER_BOTTOM}/54umpc_no_preinstaller_work"
+
+  cat > "${CASPER_BOTTOM}/62umpc_live_installer_launcher" <<'EOF'
+#! /bin/sh
+
+PREREQ=""
+DESCRIPTION="Using the UMPC live installer launcher..."
+
+prereqs()
+{
+       echo "$PREREQ"
+}
+
+case $1 in
+prereqs)
+       prereqs
+       exit 0
+       ;;
+esac
+
+. /scripts/casper-functions
+
+log_begin_msg "$DESCRIPTION"
+
+rm -f /root/etc/systemd/user/graphical-session.target.wants/ubuntu-desktop-installer.service
+rm -f /root/usr/lib/systemd/user/ubuntu-desktop-installer.service
+
+log_end_msg
+EOF
+  chmod 755 "${CASPER_BOTTOM}/62umpc_live_installer_launcher"
+
+  if ! grep -q '/scripts/casper-bottom/54umpc_no_preinstaller_work' "${CASPER_BOTTOM}/ORDER"; then
+    if grep -q '/scripts/casper-bottom/55disable_snap_refresh' "${CASPER_BOTTOM}/ORDER"; then
+      sed -i '/\/scripts\/casper-bottom\/55disable_snap_refresh/ i\/scripts/casper-bottom/54umpc_no_preinstaller_work "$@"' "${CASPER_BOTTOM}/ORDER"
+    else
+      printf '%s\n' '/scripts/casper-bottom/54umpc_no_preinstaller_work "$@"' >> "${CASPER_BOTTOM}/ORDER"
+    fi
+  fi
+
+  if ! grep -q '/scripts/casper-bottom/62umpc_live_installer_launcher' "${CASPER_BOTTOM}/ORDER"; then
+    printf '%s\n' '/scripts/casper-bottom/62umpc_live_installer_launcher "$@"' >> "${CASPER_BOTTOM}/ORDER"
+  fi
 }
 
 function append_cpio_archive() {
@@ -322,7 +430,18 @@ function prune_slim_online_manifest() {
       if (name ~ /^snap:/) {
         snap = name
         sub(/^snap:/, "", snap)
-        if (snap == "firefox" || snap == "thunderbird") {
+        if (snap == "firefox" || snap == "thunderbird" ||
+            snap == "desktop-security-center" ||
+            snap == "firmware-updater" ||
+            snap == "gnome-46-2404" ||
+            snap == "bare" ||
+            snap == "gtk-common-themes" ||
+            snap == "mesa-2404" ||
+            snap == "prompting-client" ||
+            snap == "snap-store" ||
+            snap == "snapd-desktop-integration" ||
+            snap == "pc" ||
+            snap == "pc-kernel") {
           next
         }
       }
@@ -346,6 +465,68 @@ function prune_slim_online_manifest() {
     }
   ' "${MANIFEST}" > "${TMP_FILE}"
   mv "${TMP_FILE}" "${MANIFEST}"
+}
+
+function remove_package_from_paragraph_db() {
+  local DB_FILE="${1}"
+  local PACKAGE="${2}"
+  local TMP_FILE="${DB_FILE}.tmp"
+
+  [ -f "${DB_FILE}" ] || return 0
+  awk -v pkg="${PACKAGE}" '
+    BEGIN {
+      RS = ""
+      ORS = "\n\n"
+    }
+    $0 !~ ("(^|\n)Package: " pkg "\n") {
+      print
+    }
+  ' "${DB_FILE}" > "${TMP_FILE}"
+  mv "${TMP_FILE}" "${DB_FILE}"
+}
+
+function remove_deb_package_payload() {
+  local ROOT="${1}"
+  local PACKAGE="${2}"
+  local LIST_FILE="${ROOT}/var/lib/dpkg/info/${PACKAGE}.list"
+  local PACKAGE_PATHS=()
+  local PACKAGE_PATH
+  local TARGET
+  local INDEX
+
+  echo " - Removing deb package payload ${PACKAGE}"
+  if [ -f "${LIST_FILE}" ]; then
+    mapfile -t PACKAGE_PATHS < "${LIST_FILE}"
+    for ((INDEX=${#PACKAGE_PATHS[@]} - 1; INDEX >= 0; INDEX--)); do
+      PACKAGE_PATH="${PACKAGE_PATHS[INDEX]}"
+      [ "${PACKAGE_PATH}" = "/." ] && continue
+      TARGET="${ROOT}${PACKAGE_PATH}"
+
+      if [ -L "${TARGET}" ] || [ -f "${TARGET}" ]; then
+        rm -f "${TARGET}"
+      elif [ -d "${TARGET}" ]; then
+        rmdir "${TARGET}" 2>/dev/null || true
+      fi
+    done
+  fi
+
+  rm -f "${ROOT}/var/lib/dpkg/info/${PACKAGE}."*
+  remove_package_from_paragraph_db "${ROOT}/var/lib/dpkg/status" "${PACKAGE}"
+  remove_package_from_paragraph_db "${ROOT}/var/lib/dpkg/status-old" "${PACKAGE}"
+  remove_package_from_paragraph_db "${ROOT}/var/lib/dpkg/available" "${PACKAGE}"
+  remove_package_from_paragraph_db "${ROOT}/var/lib/apt/extended_states" "${PACKAGE}"
+}
+
+function cleanup_firefox_deb_artifacts() {
+  local ROOT="${1}"
+  local ALT
+
+  for ALT in gnome-www-browser x-www-browser; do
+    if [ "$(readlink "${ROOT}/etc/alternatives/${ALT}" 2>/dev/null || true)" = "/usr/bin/firefox" ]; then
+      rm -f "${ROOT}/etc/alternatives/${ALT}"
+    fi
+    rm -f "${ROOT}/var/lib/dpkg/alternatives/${ALT}"
+  done
 }
 
 function remove_snap_from_seed_yaml() {
@@ -403,6 +584,9 @@ function remove_snap_from_state() {
 function remove_seeded_snap() {
   local ROOT="${1}"
   local SNAP_NAME="${2}"
+  local ESCAPED_SNAP_NAME
+
+  ESCAPED_SNAP_NAME=$(printf '%s' "${SNAP_NAME}" | sed 's/-/\\x2d/g')
 
   echo " - Removing seeded snap ${SNAP_NAME}"
   rm -rf "${ROOT}/snap/${SNAP_NAME}"
@@ -412,8 +596,18 @@ function remove_seeded_snap() {
   fi
 
   rm -f "${ROOT}/etc/systemd/system/snap-${SNAP_NAME}-"*.mount
+  rm -f "${ROOT}/etc/systemd/system/snap-${ESCAPED_SNAP_NAME}-"*.mount
   rm -f "${ROOT}/etc/systemd/system/multi-user.target.wants/snap-${SNAP_NAME}-"*.mount
+  rm -f "${ROOT}/etc/systemd/system/multi-user.target.wants/snap-${ESCAPED_SNAP_NAME}-"*.mount
   rm -f "${ROOT}/etc/systemd/system/snapd.mounts.target.wants/snap-${SNAP_NAME}-"*.mount
+  rm -f "${ROOT}/etc/systemd/system/snapd.mounts.target.wants/snap-${ESCAPED_SNAP_NAME}-"*.mount
+  rm -f "${ROOT}/etc/systemd/system/snap.${SNAP_NAME}."*
+  rm -f "${ROOT}/etc/systemd/system/snap.${ESCAPED_SNAP_NAME}."*
+  rm -f "${ROOT}/etc/systemd/system/multi-user.target.wants/snap.${SNAP_NAME}."*
+  rm -f "${ROOT}/etc/systemd/system/multi-user.target.wants/snap.${ESCAPED_SNAP_NAME}."*
+  rm -f "${ROOT}/etc/systemd/user/snap.${SNAP_NAME}."*
+  rm -f "${ROOT}/etc/systemd/user/graphical-session.target.wants/snap.${SNAP_NAME}."*
+  rm -rf "${ROOT}/usr/lib/systemd/user/snap.${SNAP_NAME}."*
   rm -f "${ROOT}/etc/udev/rules.d/"*snap.${SNAP_NAME}.rules
   rm -f "${ROOT}/var/cache/apparmor/"*/snap.${SNAP_NAME}.*
   rm -f "${ROOT}/var/cache/apparmor/"*/snap-update-ns.${SNAP_NAME}
@@ -479,22 +673,108 @@ EOF
   ln -sf ../umpc-install-epiphany-browser.service "${WANTS}/umpc-install-epiphany-browser.service"
 }
 
+function install_live_installer_launcher() {
+  local ROOT="${1}"
+  local SCRIPT="${ROOT}/usr/local/bin/umpc-start-ubuntu-installer"
+  local DESKTOP="${ROOT}/usr/share/applications/umpc-install-ubuntu.desktop"
+  local AUTOSTART="${ROOT}/etc/xdg/autostart/umpc-install-ubuntu.desktop"
+
+  echo " - Adding live installer launcher"
+  mkdir -p "$(dirname "${SCRIPT}")" "$(dirname "${DESKTOP}")" "$(dirname "${AUTOSTART}")"
+  cat > "${SCRIPT}" <<'EOF'
+#!/bin/sh
+set -u
+
+LOG=/tmp/umpc-start-ubuntu-installer.log
+
+{
+  echo "Starting Ubuntu installer at $(date -Is)"
+  if command -v snap >/dev/null 2>&1; then
+    snap wait system seed.loaded
+    exec snap run ubuntu-desktop-bootstrap --try-or-install "$@"
+  fi
+
+  if [ -x /snap/bin/ubuntu-desktop-bootstrap ]; then
+    exec /snap/bin/ubuntu-desktop-bootstrap --try-or-install "$@"
+  fi
+
+  echo "ubuntu-desktop-bootstrap is not available"
+  exit 1
+} >>"${LOG}" 2>&1
+EOF
+  chmod 755 "${SCRIPT}"
+
+  cat > "${DESKTOP}" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Install Ubuntu
+Comment=Install Ubuntu 26.04
+Exec=/usr/local/bin/umpc-start-ubuntu-installer
+Icon=ubiquity
+Terminal=false
+Categories=GTK;System;Settings;
+Keywords=install;ubuntu;system;
+EOF
+
+  cp "${DESKTOP}" "${AUTOSTART}"
+  cat >> "${AUTOSTART}" <<'EOF'
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5
+EOF
+}
+
 function apply_slim_online_rootfs() {
   local ROOT="${1}"
+  local SNAP_NAME
 
   echo "Applying online-slim root filesystem changes"
-  remove_seeded_snap "${ROOT}" firefox
-  remove_seeded_snap "${ROOT}" thunderbird
+  remove_deb_package_payload "${ROOT}" firefox
+  cleanup_firefox_deb_artifacts "${ROOT}"
+  remove_deb_package_payload "${ROOT}" linux-firmware-nvidia-graphics
+  for SNAP_NAME in \
+    firefox \
+    thunderbird \
+    desktop-security-center \
+    firmware-updater \
+    gnome-46-2404 \
+    bare \
+    gtk-common-themes \
+    mesa-2404 \
+    prompting-client \
+    snap-store \
+    snapd-desktop-integration; do
+    remove_seeded_snap "${ROOT}" "${SNAP_NAME}"
+  done
   rm -rf "${ROOT}/usr/lib/firmware/nvidia"
   install_epiphany_online_hook "${ROOT}"
 }
 
 function apply_slim_online_live_rootfs() {
   local ROOT="${1}"
+  local SNAP_NAME
 
   echo "Applying online-slim live layer changes"
-  remove_seeded_snap "${ROOT}" firefox
-  remove_seeded_snap "${ROOT}" thunderbird
+  for SNAP_NAME in \
+    firefox \
+    thunderbird \
+    desktop-security-center \
+    firmware-updater \
+    gnome-46-2404 \
+    bare \
+    gtk-common-themes \
+    mesa-2404 \
+    prompting-client \
+    snap-store \
+    snapd-desktop-integration \
+    pc \
+    pc-kernel; do
+    remove_seeded_snap "${ROOT}" "${SNAP_NAME}"
+  done
+  rm -f "${ROOT}/etc/systemd/system/display-manager.service.d/wait-for-snapd-seeding.conf"
+  rmdir "${ROOT}/etc/systemd/system/display-manager.service.d" 2>/dev/null || true
+  rm -f "${ROOT}/etc/systemd/user/graphical-session.target.wants/ubuntu-desktop-installer.service"
+  rm -f "${ROOT}/usr/lib/systemd/user/ubuntu-desktop-installer.service"
+  install_live_installer_launcher "${ROOT}"
   rm -f "${ROOT}/var/lib/snapd/seed/snaps/"*nvidia*.comp
 }
 
