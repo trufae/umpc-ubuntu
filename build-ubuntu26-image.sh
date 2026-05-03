@@ -13,7 +13,6 @@ DEVICE="gpd-pocket"
 ISO_IN=""
 DOWNLOAD_ONLY=0
 NO_DOWNLOAD=0
-SLIM_ONLINE=0
 
 function usage() {
   echo
@@ -25,7 +24,6 @@ function usage() {
   echo "  -i, --iso ISO           Use an existing Ubuntu ISO instead of downloading"
   echo "      --download-only     Download and verify the base ISO, then stop"
   echo "      --no-download       Require the ISO to already exist"
-  echo "      --slim-online       Accepted for compatibility; currently builds the safe full installer image"
   echo "  -h, --help              Show this help"
   echo
 }
@@ -89,10 +87,6 @@ while [ "${#}" -gt 0 ]; do
       NO_DOWNLOAD=1
       shift
       ;;
-    --slim-online)
-      SLIM_ONLINE=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -127,18 +121,12 @@ if [ "${DOWNLOAD_ONLY}" -eq 1 ]; then
   exit 0
 fi
 
-RESPIN_ARGS=(-d "${DEVICE}")
-if [ "${SLIM_ONLINE}" -eq 1 ]; then
-  echo "NOTE: --slim-online is disabled because Ubuntu 26.04 desktop-bootstrap still depends on full install media during curtin."
-  echo "      Building the known-good full installer image instead."
-fi
-
 if [ "$(id -u)" -eq 0 ]; then
-  ./umpc-ubuntu-respin.sh "${RESPIN_ARGS[@]}" "${ISO_IN}"
+  ./umpc-ubuntu-respin.sh -d "${DEVICE}" "${ISO_IN}"
 elif [ "${DEVICE}" = "gpd-pocket" ] && [ -x ./umpc-ubuntu-respin-rootless.sh ] && ! sudo -n true 2>/dev/null; then
-  ./umpc-ubuntu-respin-rootless.sh "${RESPIN_ARGS[@]}" "${ISO_IN}"
+  ./umpc-ubuntu-respin-rootless.sh -d "${DEVICE}" "${ISO_IN}"
 else
-  sudo ./umpc-ubuntu-respin.sh "${RESPIN_ARGS[@]}" "${ISO_IN}"
+  sudo ./umpc-ubuntu-respin.sh -d "${DEVICE}" "${ISO_IN}"
 fi
 
 ISO_OUT="$(basename "${ISO_IN}" .iso)-${DEVICE}.iso"

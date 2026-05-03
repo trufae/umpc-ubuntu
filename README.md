@@ -101,19 +101,6 @@ the original GPD Pocket:
 ./build-ubuntu26-image.sh
 ```
 
-`--slim-online` is currently accepted by the scripts but intentionally builds
-the same full installer image:
-
-```bash
-./build-ubuntu26-image.sh --slim-online
-```
-
-The experimental smaller image removed the offline APT repository and casper
-install layers, but Ubuntu 26.04's desktop-bootstrap/curtin path can still add
-or use `file:///cdrom` sources during installation. That caused mid-install APT
-failures, so the build now preserves the full official installer payloads until
-there is a safer slimming strategy.
-
 The wrapper downloads the base ISO into `downloads/` and then calls
 `umpc-ubuntu-respin.sh` with `sudo`. Missing local build packages are installed
 by the respin script when needed.
