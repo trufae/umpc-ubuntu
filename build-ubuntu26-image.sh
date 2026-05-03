@@ -25,7 +25,7 @@ function usage() {
   echo "  -i, --iso ISO           Use an existing Ubuntu ISO instead of downloading"
   echo "      --download-only     Download and verify the base ISO, then stop"
   echo "      --no-download       Require the ISO to already exist"
-  echo "      --slim-online       Build a smaller online-install image"
+  echo "      --slim-online       Accepted for compatibility; currently builds the safe full installer image"
   echo "  -h, --help              Show this help"
   echo
 }
@@ -129,7 +129,8 @@ fi
 
 RESPIN_ARGS=(-d "${DEVICE}")
 if [ "${SLIM_ONLINE}" -eq 1 ]; then
-  RESPIN_ARGS+=(--slim-online)
+  echo "NOTE: --slim-online is disabled because Ubuntu 26.04 desktop-bootstrap still depends on full install media during curtin."
+  echo "      Building the known-good full installer image instead."
 fi
 
 if [ "$(id -u)" -eq 0 ]; then

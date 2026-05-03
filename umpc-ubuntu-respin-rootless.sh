@@ -15,7 +15,7 @@ function usage() {
   echo "        device modifications to apply. This rootless builder currently supports 'gpd-pocket'."
   echo
   echo "    --slim-online"
-  echo "        remove offline/full-install payloads and install Epiphany online after setup."
+  echo "        accepted for compatibility; currently preserves full installer payloads."
   echo
   echo "    -h"
   echo "        display this help and exit"
@@ -264,6 +264,78 @@ function cleanup_firefox_deb_artifacts() {
   done
 }
 
+function remove_cdrom_apt_sources() {
+  local ROOT="${1}"
+  local APT_DIR="${ROOT}/etc/apt"
+  local FILE
+  local TMP_FILE
+
+  [ -d "${APT_DIR}" ] || return 0
+
+  echo " - Removing CD-ROM APT sources"
+  rm -f \
+    "${APT_DIR}/sources.list.d/"*cdrom*.list \
+    "${APT_DIR}/sources.list.d/"*cdrom*.sources
+
+  if [ -f "${APT_DIR}/sources.list" ]; then
+    TMP_FILE="${APT_DIR}/sources.list.tmp"
+    awk '
+      {
+        lower = tolower($0)
+        if (lower ~ /^[[:space:]]*deb(-src)?[[:space:]]/ &&
+            lower ~ /(cdrom:|file:\/+cdrom)/) {
+          next
+        }
+        print
+      }
+    ' "${APT_DIR}/sources.list" > "${TMP_FILE}"
+    mv "${TMP_FILE}" "${APT_DIR}/sources.list"
+  fi
+
+  for FILE in "${APT_DIR}/sources.list.d/"*.list; do
+    [ -e "${FILE}" ] || continue
+    TMP_FILE="${FILE}.tmp"
+    awk '
+      {
+        lower = tolower($0)
+        if (lower ~ /^[[:space:]]*deb(-src)?[[:space:]]/ &&
+            lower ~ /(cdrom:|file:\/+cdrom)/) {
+          next
+        }
+        print
+      }
+    ' "${FILE}" > "${TMP_FILE}"
+    mv "${TMP_FILE}" "${FILE}"
+  done
+
+  for FILE in "${APT_DIR}/sources.list.d/"*.sources; do
+    [ -e "${FILE}" ] || continue
+    TMP_FILE="${FILE}.tmp"
+    awk '
+      BEGIN {
+        RS = ""
+        ORS = "\n\n"
+      }
+      {
+        block = tolower($0)
+        if (block ~ /(^|\n)uris:[^\n]*(cdrom:|file:\/+cdrom)/) {
+          next
+        }
+        print
+      }
+    ' "${FILE}" > "${TMP_FILE}"
+    mv "${TMP_FILE}" "${FILE}"
+  done
+}
+
+function remove_packagekit_masks() {
+  local ROOT="${1}"
+
+  rm -f \
+    "${ROOT}/etc/systemd/system/packagekit.service" \
+    "${ROOT}/etc/systemd/system/packagekit-offline-update.service"
+}
+
 function keep_minimal_install_source() {
   local INSTALL_SOURCES="${1}"
   local TMP_FILE="${INSTALL_SOURCES}.tmp"
@@ -473,29 +545,52 @@ function install_live_installer_launcher() {
   local SCRIPT="${ROOT}/usr/local/bin/umpc-start-ubuntu-installer"
   local DESKTOP="${ROOT}/usr/share/applications/umpc-install-ubuntu.desktop"
   local AUTOSTART="${ROOT}/etc/xdg/autostart/umpc-install-ubuntu.desktop"
+  local SERVICE="${ROOT}/usr/lib/systemd/user/ubuntu-desktop-installer.service"
+  local WANTS="${ROOT}/etc/systemd/user/graphical-session.target.wants"
 
   echo " - Adding live installer launcher"
-  mkdir -p "$(dirname "${SCRIPT}")" "$(dirname "${DESKTOP}")" "$(dirname "${AUTOSTART}")"
+  mkdir -p "$(dirname "${SCRIPT}")" "$(dirname "${DESKTOP}")" "$(dirname "${AUTOSTART}")" "$(dirname "${SERVICE}")" "${WANTS}"
   cat > "${SCRIPT}" <<'EOF'
 #!/bin/sh
 set -u
 
 LOG=/tmp/umpc-start-ubuntu-installer.log
 
+touch "${LOG}" 2>/dev/null || LOG="${HOME:-/tmp}/umpc-start-ubuntu-installer.log"
+
+log()
 {
-  echo "Starting Ubuntu installer at $(date -Is)"
-  if command -v snap >/dev/null 2>&1; then
-    snap wait system seed.loaded
-    exec snap run ubuntu-desktop-bootstrap --try-or-install "$@"
-  fi
+  printf '%s %s\n' "$(date -Is)" "$*" | tee -a "${LOG}" >&2
+}
 
-  if [ -x /snap/bin/ubuntu-desktop-bootstrap ]; then
-    exec /snap/bin/ubuntu-desktop-bootstrap --try-or-install "$@"
-  fi
+run_installer()
+{
+  log "exec: $*"
+  exec "$@"
+}
 
-  echo "ubuntu-desktop-bootstrap is not available"
-  exit 1
-} >>"${LOG}" 2>&1
+log "Starting Ubuntu installer launcher"
+log "DISPLAY=${DISPLAY:-} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-} XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-}"
+
+if command -v snap >/dev/null 2>&1; then
+  log "Waiting for snap seed.loaded"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 300 snap wait system seed.loaded >>"${LOG}" 2>&1 || log "snap seed.loaded wait timed out or failed; trying installer anyway"
+  else
+    snap wait system seed.loaded >>"${LOG}" 2>&1 || log "snap seed.loaded wait failed; trying installer anyway"
+  fi
+fi
+
+if [ -x /snap/bin/ubuntu-desktop-bootstrap ]; then
+  run_installer /snap/bin/ubuntu-desktop-bootstrap --try-or-install "$@"
+fi
+
+if command -v snap >/dev/null 2>&1; then
+  run_installer snap run ubuntu-desktop-bootstrap --try-or-install "$@"
+fi
+
+log "ubuntu-desktop-bootstrap is not available"
+exit 1
 EOF
   chmod 755 "${SCRIPT}"
 
@@ -511,11 +606,23 @@ Categories=GTK;System;Settings;
 Keywords=install;ubuntu;system;
 EOF
 
-  cp "${DESKTOP}" "${AUTOSTART}"
-  cat >> "${AUTOSTART}" <<'EOF'
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=5
+  cat > "${SERVICE}" <<'EOF'
+[Unit]
+Description=Ubuntu Desktop Installer
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/umpc-start-ubuntu-installer
+Restart=no
+
+[Install]
+WantedBy=graphical-session.target
 EOF
+  ln -sf /usr/lib/systemd/user/ubuntu-desktop-installer.service "${WANTS}/ubuntu-desktop-installer.service"
+
+  rm -f "${AUTOSTART}"
 }
 
 function apply_slim_online_rootfs() {
@@ -523,6 +630,8 @@ function apply_slim_online_rootfs() {
   local SNAP_NAME
 
   echo "Applying online-slim root filesystem changes"
+  remove_cdrom_apt_sources "${ROOT}"
+  remove_packagekit_masks "${ROOT}"
   remove_deb_package_payload "${ROOT}" firefox
   cleanup_firefox_deb_artifacts "${ROOT}"
   remove_deb_package_payload "${ROOT}" linux-firmware-nvidia-graphics
@@ -549,6 +658,8 @@ function apply_slim_online_live_rootfs() {
   local SNAP_NAME
 
   echo "Applying online-slim live layer changes"
+  remove_cdrom_apt_sources "${ROOT}"
+  remove_packagekit_masks "${ROOT}"
   for SNAP_NAME in \
     firefox \
     thunderbird \
@@ -696,6 +807,8 @@ log_end_msg
 EOF
   chmod 755 "${CASPER_BOTTOM}/41apt_build_cache_cdrom"
 
+  [ "${SLIM_ONLINE:-0}" -eq 1 ] || return 0
+
   cat > "${CASPER_BOTTOM}/54umpc_no_preinstaller_work" <<'EOF'
 #! /bin/sh
 
@@ -716,17 +829,73 @@ esac
 
 . /scripts/casper-functions
 
-mask_unit()
+skip_live_unit()
 {
        unit="$1"
        mkdir -p /root/etc/systemd/system
+       rm -f "/root/etc/systemd/system/$unit"
+       mkdir -p "/root/etc/systemd/system/$unit.d"
+       cat > "/root/etc/systemd/system/$unit.d/umpc-live-skip.conf" <<'DROPEOF'
+[Unit]
+ConditionPathExists=!/cdrom/casper
+DROPEOF
+}
+
+remove_cdrom_apt_sources()
+{
+       apt_dir="$1/etc/apt"
+       [ -d "$apt_dir" ] || return 0
+
        rm -f \
-          "/root/etc/systemd/system/basic.target.wants/$unit" \
-          "/root/etc/systemd/system/multi-user.target.wants/$unit" \
-          "/root/etc/systemd/system/network-online.target.wants/$unit" \
-          "/root/etc/systemd/system/sockets.target.wants/$unit" \
-          "/root/etc/systemd/system/timers.target.wants/$unit"
-       ln -sf /dev/null "/root/etc/systemd/system/$unit"
+          "$apt_dir/sources.list.d/"*cdrom*.list \
+          "$apt_dir/sources.list.d/"*cdrom*.sources
+
+       if [ -f "$apt_dir/sources.list" ]; then
+          awk '
+            {
+              lower = tolower($0)
+              if (lower ~ /^[[:space:]]*deb(-src)?[[:space:]]/ &&
+                  lower ~ /(cdrom:|file:\/+cdrom)/) {
+                next
+              }
+              print
+            }
+          ' "$apt_dir/sources.list" > "$apt_dir/sources.list.tmp"
+          mv "$apt_dir/sources.list.tmp" "$apt_dir/sources.list"
+       fi
+
+       for file in "$apt_dir/sources.list.d/"*.list; do
+          [ -e "$file" ] || continue
+          awk '
+            {
+              lower = tolower($0)
+              if (lower ~ /^[[:space:]]*deb(-src)?[[:space:]]/ &&
+                  lower ~ /(cdrom:|file:\/+cdrom)/) {
+                next
+              }
+              print
+            }
+          ' "$file" > "$file.tmp"
+          mv "$file.tmp" "$file"
+       done
+
+       for file in "$apt_dir/sources.list.d/"*.sources; do
+          [ -e "$file" ] || continue
+          awk '
+            BEGIN {
+              RS = ""
+              ORS = "\n\n"
+            }
+            {
+              block = tolower($0)
+              if (block ~ /(^|\n)uris:[^\n]*(cdrom:|file:\/+cdrom)/) {
+                next
+              }
+              print
+            }
+          ' "$file" > "$file.tmp"
+          mv "$file.tmp" "$file"
+       done
 }
 
 log_begin_msg "$DESCRIPTION"
@@ -734,6 +903,9 @@ log_begin_msg "$DESCRIPTION"
 rm -f /root/etc/systemd/system/display-manager.service.d/wait-for-snapd-seeding.conf
 rmdir /root/etc/systemd/system/display-manager.service.d 2>/dev/null || true
 rm -f /root/etc/systemd/user/graphical-session.target.wants/ubuntu-desktop-installer.service
+rm -f /root/etc/systemd/system/packagekit.service
+rm -f /root/etc/systemd/system/packagekit-offline-update.service
+remove_cdrom_apt_sources /root
 
 for unit in \
     apt-daily.service \
@@ -745,15 +917,13 @@ for unit in \
     motd-news.service \
     motd-news.timer \
     NetworkManager-wait-online.service \
-    packagekit.service \
-    packagekit-offline-update.service \
     unattended-upgrades.service \
     update-notifier-download.service \
     update-notifier-download.timer \
     update-notifier-motd.service \
     update-notifier-motd.timer \
     umpc-install-epiphany-browser.service; do
-       mask_unit "$unit"
+       skip_live_unit "$unit"
 done
 
 rm -rf /root/var/lib/update-notifier/package-data-downloads/partial
@@ -787,6 +957,22 @@ log_begin_msg "$DESCRIPTION"
 
 rm -f /root/etc/systemd/user/graphical-session.target.wants/ubuntu-desktop-installer.service
 rm -f /root/usr/lib/systemd/user/ubuntu-desktop-installer.service
+mkdir -p /root/usr/lib/systemd/user /root/etc/systemd/user/graphical-session.target.wants
+cat > /root/usr/lib/systemd/user/ubuntu-desktop-installer.service <<'SERVICEEOF'
+[Unit]
+Description=Ubuntu Desktop Installer
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/umpc-start-ubuntu-installer
+Restart=no
+
+[Install]
+WantedBy=graphical-session.target
+SERVICEEOF
+ln -sf /usr/lib/systemd/user/ubuntu-desktop-installer.service /root/etc/systemd/user/graphical-session.target.wants/ubuntu-desktop-installer.service
 
 log_end_msg
 EOF
@@ -878,7 +1064,7 @@ while [ "${#}" -gt 0 ]; do
       shift 2
       ;;
     --slim-online)
-      SLIM_ONLINE=1
+      echo "NOTE: --slim-online is disabled because Ubuntu 26.04 desktop-bootstrap still depends on full install media during curtin." >&2
       shift
       ;;
     -h|--help)

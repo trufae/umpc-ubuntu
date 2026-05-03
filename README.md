@@ -101,22 +101,18 @@ the original GPD Pocket:
 ./build-ubuntu26-image.sh
 ```
 
-To build a smaller image for online installs, use:
+`--slim-online` is currently accepted by the scripts but intentionally builds
+the same full installer image:
 
 ```bash
 ./build-ubuntu26-image.sh --slim-online
 ```
 
-The online-slim image removes the full desktop install source, the offline APT
-repository, optional language/enhanced-secureboot casper overlays, Firefox and
-Thunderbird snap payloads, and desktop applications that are only useful in the
-removed full install source such as LibreOffice, Thunderbird, Transmission,
-Remmina, Rhythmbox, and Shotwell. It also adds a first-boot service that purges
-the Firefox wrapper package and installs `epiphany-browser` from the Ubuntu
-repositories once networking is available. This image expects networking during
-installation. A tiny empty `minimal.standard.squashfs` placeholder is kept
-because Ubuntu's live initrd derives required lower layers from
-`minimal.standard.live.squashfs` during boot.
+The experimental smaller image removed the offline APT repository and casper
+install layers, but Ubuntu 26.04's desktop-bootstrap/curtin path can still add
+or use `file:///cdrom` sources during installation. That caused mid-install APT
+failures, so the build now preserves the full official installer payloads until
+there is a safer slimming strategy.
 
 The wrapper downloads the base ISO into `downloads/` and then calls
 `umpc-ubuntu-respin.sh` with `sudo`. Missing local build packages are installed
